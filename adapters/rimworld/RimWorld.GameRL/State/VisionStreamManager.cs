@@ -74,7 +74,11 @@ namespace RimWorld.GameRL.State
                 Directory.CreateDirectory(directory);
             }
 
-            _fileStream = new FileStream(shmPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite);
+            // CreateNew, not OpenOrCreate: if a file already exists at this path
+            // another instance owns it, and attaching to its framebuffer would
+            // corrupt the stream silently instead of failing here. FileShare.Read
+            // still lets a reader attach, but a second writer is refused.
+            _fileStream = new FileStream(shmPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read);
             _fileStream.SetLength(_frameSize);
             _mmf = MemoryMappedFile.CreateFromFile(_fileStream, null, _frameSize, MemoryMappedFileAccess.ReadWrite, HandleInheritability.None, false);
             _accessor = _mmf.CreateViewAccessor(0, _frameSize, MemoryMappedFileAccess.ReadWrite);
@@ -226,6 +230,25 @@ namespace RimWorld.GameRL.State
             _accessor?.Dispose();
             _mmf?.Dispose();
             _fileStream?.Dispose();
+
+            // CreateNew leaves the file behind, so it has to be removed here or a
+            // crash and restart of the same instance id would fail forever on its
+            // own stale framebuffer.
+            if (_fileStream != null && !_gpuAvailable)
+            {
+                try
+                {
+                    File.Delete(ShmPath);
+                }
+                catch (IOException)
+                {
+                    // A live reader still has it mapped; nothing useful to do.
+                }
+                catch (UnauthorizedAccessException)
+                {
+                }
+            }
+
             if (_readTexture != null)
             {
                 UnityEngine.Object.Destroy(_readTexture);

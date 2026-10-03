@@ -276,6 +276,13 @@
   "tick_rate": 60,
   "max_episode_ticks": 900000,
   "ipc": {
-    "socket_path": "/tmp/gamerl-rimworld.sock"
+    "requires_env": ["GAMERL_INSTANCE_ID"],
+    "socket_path_template": "{TMP}/gamerl-rimworld-{GAMERL_INSTANCE_ID}.sock",
+    "socket_path_override_env": "GAMERL_SOCKET",
+    "vision_shm_template": "{TMP}/gamerl-rimworld-camera-{GAMERL_INSTANCE_ID}-{stream}.shm",
+    "vision_shm_override_env": "GAMERL_CAMERA_SHM",
+    "log_dir_template": "{TMP}/gamerl-logs/{GAMERL_INSTANCE_ID}",
+    "log_dir_override_env": "GAMERL_LOG_DIR",
+    "notes": "There is no global fallback path. A shared socket or framebuffer path does not fail loudly under parallel rollout: the second instance attaches to the first one's resources and the corruption surfaces later as unexplained divergence. The mod refuses to start without GAMERL_INSTANCE_ID."
   }
 }

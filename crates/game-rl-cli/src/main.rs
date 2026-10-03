@@ -1,17 +1,20 @@
 //! Game-RL MCP Server
 //!
 //! Unified server that auto-detects which game is running:
-//! - RimWorld via Unix socket (/tmp/gamerl-rimworld.sock)
+//! - RimWorld via Unix socket (/tmp/gamerl-rimworld-{INSTANCE_ID}.sock)
 //! - Project Zomboid via file IPC (~/Zomboid/Lua/gamerl_response.json)
 //! - Factorio via RCON (localhost:27015)
 //!
-//! Detection checks all sources and picks the most recently active one.
+//! Detection checks all sources and picks the most recently active one. With
+//! several RimWorld instances running that heuristic is ambiguous, so an
+//! explicit --socket (or GAMERL_INSTANCE_ID) takes precedence and, for
+//! RimWorld, is required: there is no global fallback path.
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use factorio_bridge::{FactorioBridge, FactorioConfig};
 use game_rl_server::{GameEnvironment, GameRLServer};
 use harmony_bridge::HarmonyBridge;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use tokio::net::TcpStream;
 use tokio::time::sleep;
@@ -25,8 +28,69 @@ struct GameCandidate {
     modified: SystemTime,
 }
 
-const RIMWORLD_SOCKET: &str = "/tmp/gamerl-rimworld.sock";
+const RIMWORLD_SOCKET_PREFIX: &str = "gamerl-rimworld-";
+const RIMWORLD_SOCKET_SUFFIX: &str = ".sock";
 const FACTORIO_RCON_ADDR: &str = "127.0.0.1:27015";
+
+/// Resolve the RimWorld IPC socket.
+///
+/// `explicit` comes from `--socket` and wins outright. Otherwise
+/// `GAMERL_INSTANCE_ID` selects one instance's socket. With neither we refuse to
+/// start rather than fall back to a shared path: under parallel rollout a shared
+/// path silently attaches to whichever instance is there, and the resulting data
+/// is contaminated rather than broken.
+///
+/// When several instances are live, every candidate socket is returned so the
+/// caller can report them instead of guessing by mtime.
+fn resolve_rimworld_sockets(explicit: Option<&str>) -> Result<Vec<std::path::PathBuf>> {
+    if let Some(p) = explicit {
+        return Ok(vec![PathBuf::from(p)]);
+    }
+
+    if let Ok(id) = std::env::var("GAMERL_INSTANCE_ID")
+        && !id.trim().is_empty()
+    {
+        let p = std::env::temp_dir().join(format!("{RIMWORLD_SOCKET_PREFIX}{id}{RIMWORLD_SOCKET_SUFFIX}"));
+        return Ok(vec![p]);
+    }
+
+    let live: Vec<std::path::PathBuf> = std::env::temp_dir()
+        .read_dir()
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|n| {
+                            n.starts_with(RIMWORLD_SOCKET_PREFIX) && n.ends_with(RIMWORLD_SOCKET_SUFFIX)
+                        })
+                        .unwrap_or(false)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if live.len() == 1 {
+        return Ok(live);
+    }
+
+    if live.is_empty() {
+        // No socket yet: the game may simply not have launched. An empty target
+        // list means "keep waiting", not "pick something".
+        return Ok(Vec::new());
+    }
+
+    bail!(
+        "{} RimWorld instances are live ({}) and none was selected. Refusing to guess: \
+         set GAMERL_INSTANCE_ID or pass --socket <path>.",
+        live.len(),
+        live.iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
 
 /// Run the MCP server with a game bridge
 async fn run_with_bridge<E: GameEnvironment>(bridge: E) -> Result<()> {
@@ -42,6 +106,20 @@ fn get_mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).ok()?.modified().ok()
 }
 
+/// `--socket <path>`, or None.
+fn parse_socket_arg() -> Option<String> {
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        if a == "--socket" {
+            return args.next();
+        }
+        if let Some(v) = a.strip_prefix("--socket=") {
+            return Some(v.to_string());
+        }
+    }
+    None
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging
@@ -50,6 +128,11 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
+
+    let explicit = parse_socket_arg();
+    // Resolve once: ambiguity must be reported before we start polling, not
+    // silently resolved by mtime later.
+    let rimworld_sockets = resolve_rimworld_sockets(explicit.as_deref())?;
 
     info!("Game-RL MCP server starting (auto-detecting game)...");
 
@@ -63,11 +146,13 @@ async fn main() -> Result<()> {
         let mut candidates: Vec<GameCandidate> = Vec::new();
 
         // Check all potential game sources
-        if let Some(mtime) = get_mtime(Path::new(RIMWORLD_SOCKET)) {
-            candidates.push(GameCandidate {
-                name: "RimWorld",
-                modified: mtime,
-            });
+        for sock in &rimworld_sockets {
+            if let Some(mtime) = get_mtime(sock) {
+                candidates.push(GameCandidate {
+                    name: "RimWorld",
+                    modified: mtime,
+                });
+            }
         }
 
         if let Some(mtime) = get_mtime(&zomboid_response) {
@@ -97,8 +182,19 @@ async fn main() -> Result<()> {
 
             match candidate.name {
                 "RimWorld" => {
-                    info!("RimWorld socket detected: {}", RIMWORLD_SOCKET);
-                    let mut bridge = HarmonyBridge::new(RIMWORLD_SOCKET);
+                    // Candidates are pushed in rimworld_sockets order, so the
+                    // index identifies which instance we are connecting to.
+                    let idx = candidates
+                        .iter()
+                        .position(|c| std::ptr::eq(c, candidate))
+                        .unwrap_or(0);
+                    let sock = rimworld_sockets
+                        .get(idx)
+                        .unwrap_or(&rimworld_sockets[0])
+                        .display()
+                        .to_string();
+                    info!("RimWorld socket detected: {}", sock);
+                    let mut bridge = HarmonyBridge::new(&sock);
                     match bridge.connect().await {
                         Ok(()) => return run_with_bridge(bridge).await,
                         Err(e) => warn!("RimWorld socket exists but connect failed: {}", e),
@@ -126,7 +222,16 @@ async fn main() -> Result<()> {
 
         if candidates.is_empty() {
             info!("Waiting for game connection...");
-            info!("  RimWorld: socket at {}", RIMWORLD_SOCKET);
+            if rimworld_sockets.is_empty() {
+                info!(
+                    "  RimWorld: no socket yet and no GAMERL_INSTANCE_ID set. If more than one \
+                     instance will run, set it now so this server attaches to the right one."
+                );
+            } else {
+                for s in &rimworld_sockets {
+                    info!("  RimWorld: socket at {}", s.display());
+                }
+            }
             info!("  Zomboid:  file at {:?}", zomboid_response);
             info!(
                 "  Factorio: RCON at {} (enable in config.ini, host multiplayer)",

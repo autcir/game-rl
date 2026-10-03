@@ -2,6 +2,7 @@
 
 using System;
 using System.IO;
+using System.Linq;
 using System.Collections.Generic;
 using HarmonyLib;
 using Verse;
@@ -69,6 +70,9 @@ namespace RimWorld.GameRL
 
                 // Start listening for harmony-server connection
                 var socketPath = GetSocketPath();
+                Log.Message(
+                    $"[GameRL] instance={InstanceId()} socket={socketPath} " +
+                    $"log_dir={InstanceLogDir()}");
                 Log.Message($"[GameRL] Starting IPC server on {socketPath}...");
 
                 _bridge = new RimWorldBridge();
@@ -100,13 +104,63 @@ namespace RimWorld.GameRL
 
         private static string GetSocketPath()
         {
-            // Check environment variable first
+            // Explicit override wins, but it is still per-instance by contract:
+            // the launcher is responsible for making it unique.
             var envPath = Environment.GetEnvironmentVariable("GAMERL_SOCKET");
             if (!string.IsNullOrEmpty(envPath))
                 return envPath;
 
-            // Default path - use /tmp for consistency across platforms
-            return "/tmp/gamerl-rimworld.sock";
+            return Path.Combine(Path.GetTempPath(), $"gamerl-rimworld-{InstanceId()}.sock");
+        }
+
+        private static string GetCameraShmPath(string streamId)
+        {
+            var envPath = Environment.GetEnvironmentVariable("GAMERL_CAMERA_SHM");
+            if (!string.IsNullOrEmpty(envPath))
+                return envPath;
+
+            return Path.Combine(
+                Path.GetTempPath(),
+                $"gamerl-rimworld-camera-{InstanceId()}-{streamId}.shm");
+        }
+
+        /// <summary>
+        /// Identity of this game process.
+        ///
+        /// Required, with no fallback. A shared socket or framebuffer path does
+        /// not fail loudly when two colonies run side by side: the second
+        /// instance attaches to the first one's resources and the corruption
+        /// only shows up later as unexplainable divergence.
+        /// </summary>
+        internal static string InstanceId()
+        {
+            var id = Environment.GetEnvironmentVariable("GAMERL_INSTANCE_ID");
+            if (string.IsNullOrWhiteSpace(id))
+                throw new InvalidOperationException(
+                    "GAMERL_INSTANCE_ID is not set. game-rl does not fall back to a shared " +
+                    "path. Export GAMERL_INSTANCE_ID to a unique value for each RimWorld " +
+                    "process (letters, digits, '-' and '_' only).");
+
+            if (id.Length > 64 || id.Any(c => !char.IsLetterOrDigit(c) && c != '-' && c != '_'))
+                throw new InvalidOperationException(
+                    $"GAMERL_INSTANCE_ID '{id}' is not a valid instance id: at most 64 " +
+                    "characters from letters, digits, '-' and '_'.");
+
+            return id;
+        }
+
+        /// <summary>
+        /// Per-instance directory for this mod's own log. RimWorld's Player.log is
+        /// controlled by Unity and cannot be redirected from a mod: launch the game
+        /// with -logFile to isolate that one.
+        /// </summary>
+        internal static string InstanceLogDir()
+        {
+            var dir = Environment.GetEnvironmentVariable("GAMERL_LOG_DIR");
+            if (!string.IsNullOrEmpty(dir))
+                return dir;
+
+            return Path.Combine(Path.GetTempPath(), "gamerl-logs", InstanceId());
         }
 
         // ═══════════════════════════════════════════════════════════════════════════
@@ -495,7 +549,7 @@ namespace RimWorld.GameRL
 
             var (width, height) = ParseVisionProfile(profile);
             var streamId = $"camera_{profile}";
-            var shmPath = Path.Combine(Path.GetTempPath(), $"gamerl-rimworld-{streamId}.shm");
+            var shmPath = GetCameraShmPath(streamId);
             stream = new VisionStreamManager(streamId, width, height, shmPath);
             _visionStreams[profile] = stream;
             return stream;

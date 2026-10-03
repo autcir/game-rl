@@ -253,6 +253,60 @@ Game sends:  StepComplete with observation AND reward
 
 ---
 
+## Multi-instance isolation
+
+Every runtime path is per-instance. There is **no global fallback**: the mod
+refuses to start without `GAMERL_INSTANCE_ID`, because a shared path does not
+fail loudly when two colonies run side by side. The second instance attaches to
+the first one's socket or framebuffer, and the corruption only shows up later as
+unexplainable divergence.
+
+| Variable | Required | Default | Purpose |
+|----------|----------|---------|---------|
+| `GAMERL_INSTANCE_ID` | yes | none | Identity of this game process |
+| `GAMERL_SOCKET` | no | `{TMP}/gamerl-rimworld-{id}.sock` | Full socket override |
+| `GAMERL_CAMERA_SHM` | no | `{TMP}/gamerl-rimworld-camera-{id}-{stream}.shm` | Full vision override |
+| `GAMERL_LOG_DIR` | no | `{TMP}/gamerl-logs/{id}` | Per-instance log directory |
+
+`GAMERL_INSTANCE_ID` accepts at most 64 characters from letters, digits, `-` and
+`_`. Anything else is rejected rather than sanitised, so a typo fails loudly
+instead of collapsing two instances onto one id.
+
+The vision framebuffer is opened with `FileMode.CreateNew`, so a second writer is
+refused with an `IOException` instead of silently overwriting the first
+instance's stream.
+
+### Launching the server against one instance
+
+`game-rl-server` refuses to guess when several instances are live:
+
+```bash
+GAMERL_INSTANCE_ID=alpha cargo run -p game-rl-server
+GAMERL_INSTANCE_ID=beta  cargo run -p game-rl-server
+
+# or, explicitly
+cargo run -p game-rl-server -- --socket "$TMP/gamerl-rimworld-alpha.sock"
+```
+
+If exactly one instance is live and no id is given, that one is used. If two or
+more are live the server exits with the list of candidates rather than picking by
+modification time.
+
+### RimWorld's own log
+
+RimWorld writes `Player.log` through Unity, and a mod cannot redirect it. Launch
+the game with `-logFile` pointing into the instance directory:
+
+```bash
+RimWorldLinux -logFile "${TMP}/gamerl-logs/alpha/Player.log"
+```
+
+Without this, two instances interleave into one log and post-mortem diagnosis of a
+failed episode becomes unreliable. This is the one isolation item the mod cannot
+enforce on its own.
+
+---
+
 ## File Paths
 
 ### macOS
@@ -260,7 +314,7 @@ Game sends:  StepComplete with observation AND reward
 RimWorld: ~/Library/Application Support/Steam/steamapps/common/RimWorld/
 Mods:     .../RimWorldMac.app/Mods/
 Managed:  .../RimWorldMac.app/Contents/Resources/Data/Managed/
-Logs:     ~/Library/Logs/Ludeon Studios/RimWorld/Player.log
+Logs:     ~/Library/Logs/Ludeon Studios/RimWorld/Player.log  (see -logFile above)
 ```
 
 ### Linux
@@ -268,7 +322,13 @@ Logs:     ~/Library/Logs/Ludeon Studios/RimWorld/Player.log
 RimWorld: ~/.local/share/Steam/steamapps/common/RimWorld/
 Mods:     .../RimWorld/Mods/
 Managed:  .../RimWorldLinux_Data/Managed/
+Logs:     ~/Logs/Ludeon Studios/RimWorld/Player.log  (see -logFile above)
 ```
+
+RimWorld has no native Linux build. Under Proton/Wine the IPC socket is a Unix
+socket from the .NET side, so verify that `UnixDomainSocketEndPoint` binds and
+accepts under that runtime before trusting any benchmark. Do not assume it works
+and do not assume it fails.
 
 ---
 
