@@ -26,6 +26,8 @@ use zomboid_bridge::{ZomboidBridge, ZomboidConfig};
 struct GameCandidate {
     name: &'static str,
     modified: SystemTime,
+    /// Set for RimWorld: which instance's socket this candidate refers to.
+    sock: Option<PathBuf>,
 }
 
 const RIMWORLD_SOCKET_PREFIX: &str = "gamerl-rimworld-";
@@ -50,7 +52,9 @@ fn resolve_rimworld_sockets(explicit: Option<&str>) -> Result<Vec<std::path::Pat
     if let Ok(id) = std::env::var("GAMERL_INSTANCE_ID")
         && !id.trim().is_empty()
     {
-        let p = std::env::temp_dir().join(format!("{RIMWORLD_SOCKET_PREFIX}{id}{RIMWORLD_SOCKET_SUFFIX}"));
+        let p = std::env::temp_dir().join(format!(
+            "{RIMWORLD_SOCKET_PREFIX}{id}{RIMWORLD_SOCKET_SUFFIX}"
+        ));
         return Ok(vec![p]);
     }
 
@@ -63,7 +67,8 @@ fn resolve_rimworld_sockets(explicit: Option<&str>) -> Result<Vec<std::path::Pat
                     p.file_name()
                         .and_then(|n| n.to_str())
                         .map(|n| {
-                            n.starts_with(RIMWORLD_SOCKET_PREFIX) && n.ends_with(RIMWORLD_SOCKET_SUFFIX)
+                            n.starts_with(RIMWORLD_SOCKET_PREFIX)
+                                && n.ends_with(RIMWORLD_SOCKET_SUFFIX)
                         })
                         .unwrap_or(false)
                 })
@@ -151,6 +156,7 @@ async fn main() -> Result<()> {
                 candidates.push(GameCandidate {
                     name: "RimWorld",
                     modified: mtime,
+                    sock: Some(sock.clone()),
                 });
             }
         }
@@ -159,6 +165,7 @@ async fn main() -> Result<()> {
             candidates.push(GameCandidate {
                 name: "Zomboid",
                 modified: mtime,
+                sock: None,
             });
         }
 
@@ -167,6 +174,7 @@ async fn main() -> Result<()> {
             candidates.push(GameCandidate {
                 name: "Factorio",
                 modified: SystemTime::now(), // Active connection = most fresh
+                sock: None,
             });
         }
 
@@ -182,17 +190,10 @@ async fn main() -> Result<()> {
 
             match candidate.name {
                 "RimWorld" => {
-                    // Candidates are pushed in rimworld_sockets order, so the
-                    // index identifies which instance we are connecting to.
-                    let idx = candidates
-                        .iter()
-                        .position(|c| std::ptr::eq(c, candidate))
-                        .unwrap_or(0);
-                    let sock = rimworld_sockets
-                        .get(idx)
-                        .unwrap_or(&rimworld_sockets[0])
-                        .display()
-                        .to_string();
+                    let Some(sock) = candidate.sock.as_ref() else {
+                        continue;
+                    };
+                    let sock = sock.display().to_string();
                     info!("RimWorld socket detected: {}", sock);
                     let mut bridge = HarmonyBridge::new(&sock);
                     match bridge.connect().await {
