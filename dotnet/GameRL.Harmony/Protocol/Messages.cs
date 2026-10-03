@@ -77,6 +77,24 @@ namespace GameRL.Harmony.Protocol
         public bool Done { get; set; }
         public bool Truncated { get; set; }
         public string? StateHash { get; set; }
+        public StepMetricsMessage? Metrics { get; set; }
+    }
+
+    /// <summary>
+    /// Per-phase timings for one step.
+    ///
+    /// A slow simulation and a slow bridge are indistinguishable from the
+    /// outside and call for opposite responses: the first means port the
+    /// simulation out of Unity, the second means fix the adapter.
+    /// </summary>
+    public class StepMetricsMessage
+    {
+        public double StepMs { get; set; }
+        public double TickMs { get; set; }
+        public double ExecuteMs { get; set; }
+        public double ExtractMs { get; set; }
+        public double RewardMs { get; set; }
+        public double CaptureMs { get; set; }
     }
 
     /// <summary>

@@ -383,10 +383,12 @@ namespace GameRL.Harmony
             Dictionary<string, double> rewardComponents,
             bool done,
             bool truncated,
-            string? stateHash = null)
+            string? stateHash = null,
+            StepMetricsMessage? metrics = null)
         {
             Send(new StepResultMessage
             {
+                Metrics = metrics,
                 AgentId = agentId,
                 Observation = observation,
                 Reward = reward,
@@ -588,6 +590,19 @@ namespace GameRL.Harmony
             if (message.StateHash != null)
             {
                 obj["StateHash"] = message.StateHash;
+            }
+
+            if (message.Metrics != null)
+            {
+                obj["Metrics"] = new JObject
+                {
+                    ["StepMs"] = message.Metrics.StepMs,
+                    ["TickMs"] = message.Metrics.TickMs,
+                    ["ExecuteMs"] = message.Metrics.ExecuteMs,
+                    ["ExtractMs"] = message.Metrics.ExtractMs,
+                    ["RewardMs"] = message.Metrics.RewardMs,
+                    ["CaptureMs"] = message.Metrics.CaptureMs
+                };
             }
 
             return obj;

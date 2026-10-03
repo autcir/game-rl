@@ -244,7 +244,7 @@ impl GameEnvironment for HarmonyBridge {
                 events: vec![],
                 frame_ids: HashMap::new(),
                 available_actions: None,
-                metrics: None,
+                metrics: payload.metrics,
                 state_hash: payload.state_hash,
             }
         }

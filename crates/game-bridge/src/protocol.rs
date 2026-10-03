@@ -6,7 +6,7 @@
 //! Uses PascalCase throughout for LLM-friendly natural language readability.
 
 use game_rl_core::{
-    Action, AgentConfig, AgentId, AgentType, GameEvent, Observation, StreamDescriptor,
+    Action, AgentConfig, AgentId, AgentType, GameEvent, Observation, StepMetrics, StreamDescriptor,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -24,6 +24,9 @@ pub struct StepResultPayload {
     pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state_hash: Option<String>,
+    /// Per-phase timings, so a slow simulation can be told apart from a slow bridge.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<StepMetrics>,
 }
 
 /// Messages sent between Rust bridge and game process

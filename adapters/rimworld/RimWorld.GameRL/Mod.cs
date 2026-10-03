@@ -1,6 +1,7 @@
 // RimWorld GameRL Mod Entry Point
 
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Collections.Generic;
@@ -42,6 +43,14 @@ namespace RimWorld.GameRL
         private static uint _ticksRemaining;
         private static bool _stepInProgress;
         private static bool _forcingTicks;
+
+        // Per-step phase timings. A slow simulation and a slow bridge look the
+        // same from outside the process and call for opposite responses, so the
+        // split is reported rather than just the total.
+        private static readonly Stopwatch _stepWatch = new();
+        private static double _tickMs;
+        private static double _executeMs;
+        private static double _captureMs;
 
         // Event push tracking
         private static int _ticksSinceLastEventPush;
@@ -237,10 +246,16 @@ namespace RimWorld.GameRL
             _currentAgentId = msg.AgentId;
             _ticksRemaining = msg.Ticks > 0 ? msg.Ticks : 1;
             _stepInProgress = true;
+            _tickMs = 0;
+            _executeMs = 0;
+            _captureMs = 0;
+            _stepWatch.Restart();
 
             try
             {
+                var execWatch = Stopwatch.StartNew();
                 _commandExecutor?.ExecuteAction(msg.AgentId, msg.Action!);
+                _executeMs = execWatch.Elapsed.TotalMilliseconds;
 
                 // Force ticks to advance immediately
                 ForceTicks(_ticksRemaining);
@@ -266,6 +281,7 @@ namespace RimWorld.GameRL
             }
 
             _forcingTicks = true;
+            var watch = Stopwatch.StartNew();
             try
             {
                 // Force the game to advance by calling DoSingleTick directly
@@ -277,6 +293,7 @@ namespace RimWorld.GameRL
             }
             finally
             {
+                _tickMs = watch.Elapsed.TotalMilliseconds;
                 _forcingTicks = false;
             }
         }
@@ -431,20 +448,24 @@ namespace RimWorld.GameRL
             try
             {
                 var (done, truncated, reason) = _commandExecutor.CheckTermination();
+                var captureWatch = Stopwatch.StartNew();
                 foreach (var stream in _visionStreams.Values)
                 {
                     stream.Capture();
                 }
+                _captureMs = captureWatch.Elapsed.TotalMilliseconds;
 
                 // Pass action result to state extractor for observation
                 _stateExtractor.LastActionResult = _commandExecutor.LastActionResult;
 
+                var hashWatch = Stopwatch.StartNew();
                 var stateHash = _stateExtractor!.ComputeStateHash();
+                var hashMs = hashWatch.Elapsed.TotalMilliseconds;
 
                 if (_agents.Count <= 1)
                 {
-                    var observation = ExtractObservationForAgent(_currentAgentId ?? "default");
-                    var rewardComponents = _commandExecutor.ComputeReward(_currentAgentId ?? "default");
+                    var observation = ExtractTimed(_currentAgentId ?? "default", out var extractMs);
+                    var rewardComponents = ComputeRewardTimed(_currentAgentId ?? "default", out var rewardMs);
                     var totalReward = _commandExecutor.GetTotalReward(_currentAgentId ?? "default");
 
                     _bridge?.SendStepResult(
@@ -454,15 +475,16 @@ namespace RimWorld.GameRL
                         rewardComponents,
                         done,
                         truncated,
-                        stateHash);
+                        stateHash,
+                        BuildMetrics(extractMs + hashMs, rewardMs));
                     return;
                 }
 
                 var results = new List<StepResultMessage>();
                 foreach (var agentId in _agents.Keys)
                 {
-                    var observation = ExtractObservationForAgent(agentId);
-                    var rewardComponents = _commandExecutor.ComputeReward(agentId);
+                    var observation = ExtractTimed(agentId, out var extractMs);
+                    var rewardComponents = ComputeRewardTimed(agentId, out var rewardMs);
                     var totalReward = _commandExecutor.GetTotalReward(agentId);
 
                     results.Add(new StepResultMessage
@@ -473,7 +495,8 @@ namespace RimWorld.GameRL
                         RewardComponents = rewardComponents,
                         Done = done,
                         Truncated = truncated,
-                        StateHash = stateHash
+                        StateHash = stateHash,
+                        Metrics = BuildMetrics(extractMs + hashMs, rewardMs)
                     });
                 }
 
@@ -484,6 +507,38 @@ namespace RimWorld.GameRL
                 Log.Error($"[GameRL] Step complete error: {ex}");
                 _bridge?.SendError(-32603, ex.Message);
             }
+        }
+
+        private static object ExtractTimed(string agentId, out double extractMs)
+        {
+            var watch = Stopwatch.StartNew();
+            var obs = ExtractObservationForAgent(agentId);
+            extractMs = watch.Elapsed.TotalMilliseconds;
+            return obs;
+        }
+
+        private static Dictionary<string, double> ComputeRewardTimed(string agentId, out double rewardMs)
+        {
+            var watch = Stopwatch.StartNew();
+            var components = _commandExecutor!.ComputeReward(agentId);
+            rewardMs = watch.Elapsed.TotalMilliseconds;
+            return components;
+        }
+
+        private static StepMetricsMessage? BuildMetrics(double extractMs, double rewardMs)
+        {
+            if (_stepWatch.Elapsed.TotalMilliseconds <= 0)
+                return null;
+
+            return new StepMetricsMessage
+            {
+                StepMs = _stepWatch.Elapsed.TotalMilliseconds,
+                TickMs = _tickMs,
+                ExecuteMs = _executeMs,
+                ExtractMs = extractMs,
+                RewardMs = rewardMs,
+                CaptureMs = _captureMs
+            };
         }
 
         /// <summary>

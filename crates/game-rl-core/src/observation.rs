@@ -103,7 +103,11 @@ pub struct GameEvent {
 }
 
 /// Performance metrics for a step
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// The split matters more than the total. A slow environment and a slow bridge
+/// look identical from the outside, and they call for opposite responses: the
+/// first means port the simulation, the second means fix the adapter.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct StepMetrics {
     /// Total step time in milliseconds
@@ -116,4 +120,24 @@ pub struct StepMetrics {
     /// Whether a vision frame was dropped
     #[serde(default)]
     pub frame_dropped: bool,
+
+    /// Pure simulation: time inside the forced tick loop
+    #[serde(default)]
+    pub tick_ms: f64,
+
+    /// Action execution, excluding the tick loop
+    #[serde(default)]
+    pub execute_ms: f64,
+
+    /// State extraction
+    #[serde(default)]
+    pub extract_ms: f64,
+
+    /// Reward computation
+    #[serde(default)]
+    pub reward_ms: f64,
+
+    /// Vision frame capture, when a stream is configured
+    #[serde(default)]
+    pub capture_ms: f64,
 }
