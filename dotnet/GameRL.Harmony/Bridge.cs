@@ -433,11 +433,29 @@ namespace GameRL.Harmony
             var config = obj["Config"] as JObject;
             if (config != null)
             {
-                msg.Config = new AgentConfig
+                var parsed = new AgentConfig
                 {
                     EntityId = config["EntityId"]?.ToString(),
-                    ObservationProfile = config["ObservationProfile"]?.ToString() ?? "default"
+                    ObservationProfile = config["ObservationProfile"]?.ToString() ?? "default",
+                    ObservationMode = config["ObservationMode"]?.ToString()
                 };
+
+                // Anything the typed fields do not cover still has to reach the
+                // adapter: DeltaConfig and other game-specific keys travel here.
+                foreach (var prop in config.Properties())
+                {
+                    if (prop.Name == "EntityId"
+                        || prop.Name == "ObservationProfile"
+                        || prop.Name == "ObservationMode"
+                        || prop.Name == "ActionMask"
+                        || prop.Name == "RewardShaping")
+                    {
+                        continue;
+                    }
+                    parsed.Extra[prop.Name] = prop.Value?.ToObject<object>();
+                }
+
+                msg.Config = parsed;
             }
 
             return msg;

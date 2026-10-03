@@ -48,6 +48,11 @@ namespace RimWorld.GameRL
         // same from outside the process and call for opposite responses, so the
         // split is reported rather than just the total.
         private static readonly Stopwatch _stepWatch = new();
+        /// <summary>
+        /// Static because CompleteStep runs from inside the tick loop, via the OnTick
+        /// patch, before ForceTicks' finally block would have assigned a value.
+        /// </summary>
+        private static readonly Stopwatch _tickWatch = new();
         private static double _tickMs;
         private static double _executeMs;
         private static double _captureMs;
@@ -326,7 +331,7 @@ namespace RimWorld.GameRL
             }
 
             _forcingTicks = true;
-            var watch = Stopwatch.StartNew();
+            _tickWatch.Restart();
             try
             {
                 // Force the game to advance by calling DoSingleTick directly
@@ -338,7 +343,7 @@ namespace RimWorld.GameRL
             }
             finally
             {
-                _tickMs = watch.Elapsed.TotalMilliseconds;
+                _tickMs = _tickWatch.Elapsed.TotalMilliseconds;
                 _forcingTicks = false;
             }
         }
@@ -578,7 +583,7 @@ namespace RimWorld.GameRL
             return new StepMetricsMessage
             {
                 StepMs = _stepWatch.Elapsed.TotalMilliseconds,
-                TickMs = _tickMs,
+                TickMs = _tickMs > 0 ? _tickMs : _tickWatch.Elapsed.TotalMilliseconds,
                 ExecuteMs = _executeMs,
                 ExtractMs = extractMs,
                 RewardMs = rewardMs,
