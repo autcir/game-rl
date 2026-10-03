@@ -5,7 +5,7 @@
   "capabilities": {
     "multi_agent": true,
     "max_agents": 8,
-    "deterministic": true,
+    "deterministic": false,
     "headless": false,
     "save_replay": true,
     "delta_observations": true
@@ -13,7 +13,11 @@
   "agent_config": {
     "ObservationMode": {
       "type": "string",
-      "enum": ["minimal", "normal", "full"],
+      "enum": [
+        "minimal",
+        "normal",
+        "full"
+      ],
       "default": "minimal",
       "description": "minimal (~1-3KB deltas), normal (~10-20KB), full (~35-150KB per step)"
     },
@@ -21,13 +25,37 @@
       "type": "object",
       "description": "Optional thresholds for delta reporting",
       "properties": {
-        "MoodThreshold": {"type": "float", "default": 0.10, "description": "Report mood changes >= this (0-1)"},
-        "HealthThreshold": {"type": "float", "default": 0.10},
-        "HungerThreshold": {"type": "float", "default": 0.10},
-        "RestThreshold": {"type": "float", "default": 0.10},
-        "PositionThreshold": {"type": "int", "default": 5, "description": "Tiles moved before reporting"},
-        "PositionOnlyOnJobChange": {"type": "bool", "default": true},
-        "ResourcePercentThreshold": {"type": "float", "default": 0.05, "description": "0 = any change"}
+        "MoodThreshold": {
+          "type": "float",
+          "default": 0.1,
+          "description": "Report mood changes >= this (0-1)"
+        },
+        "HealthThreshold": {
+          "type": "float",
+          "default": 0.1
+        },
+        "HungerThreshold": {
+          "type": "float",
+          "default": 0.1
+        },
+        "RestThreshold": {
+          "type": "float",
+          "default": 0.1
+        },
+        "PositionThreshold": {
+          "type": "int",
+          "default": 5,
+          "description": "Tiles moved before reporting"
+        },
+        "PositionOnlyOnJobChange": {
+          "type": "bool",
+          "default": true
+        },
+        "ResourcePercentThreshold": {
+          "type": "float",
+          "default": 0.05,
+          "description": "0 = any change"
+        }
       }
     }
   },
@@ -48,138 +76,258 @@
       {
         "name": "Draft",
         "description": "Draft a colonist for direct control",
-        "params": {"ColonistId": {"type": "entity_id", "description": "Colonist ThingID"}}
+        "params": {
+          "ColonistId": {
+            "type": "entity_id",
+            "description": "Colonist ThingID"
+          }
+        }
       },
       {
         "name": "Undraft",
         "description": "Undraft a colonist",
-        "params": {"ColonistId": {"type": "entity_id"}}
+        "params": {
+          "ColonistId": {
+            "type": "entity_id"
+          }
+        }
       },
       {
         "name": "Move",
         "description": "Move a drafted pawn to target coordinates",
         "params": {
-          "ColonistId": {"type": "entity_id"},
-          "X": {"type": "int", "description": "Target X coordinate"},
-          "Y": {"type": "int", "description": "Target Z coordinate"}
+          "ColonistId": {
+            "type": "entity_id"
+          },
+          "X": {
+            "type": "int",
+            "description": "Target X coordinate"
+          },
+          "Y": {
+            "type": "int",
+            "description": "Target Z coordinate"
+          }
         }
       },
       {
         "name": "MoveToEntity",
         "description": "Move a pawn toward a target entity",
         "params": {
-          "ColonistId": {"type": "entity_id"},
-          "TargetId": {"type": "entity_id", "description": "Target entity ThingID"}
+          "ColonistId": {
+            "type": "entity_id"
+          },
+          "TargetId": {
+            "type": "entity_id",
+            "description": "Target entity ThingID"
+          }
         }
       },
       {
         "name": "Attack",
         "description": "Force a drafted pawn to attack a target",
         "params": {
-          "ColonistId": {"type": "entity_id"},
-          "TargetId": {"type": "entity_id"}
+          "ColonistId": {
+            "type": "entity_id"
+          },
+          "TargetId": {
+            "type": "entity_id"
+          }
         }
       },
       {
         "name": "Haul",
         "description": "Force a pawn to haul an item to a stockpile",
         "params": {
-          "ColonistId": {"type": "entity_id"},
-          "ItemId": {"type": "entity_id"}
+          "ColonistId": {
+            "type": "entity_id"
+          },
+          "ItemId": {
+            "type": "entity_id"
+          }
         }
       },
       {
         "name": "SetWorkPriority",
         "description": "Set work priority for a colonist (0=disabled, 1=highest, 4=lowest)",
         "params": {
-          "ColonistId": {"type": "entity_id"},
-          "WorkType": {"type": "string", "description": "Work type defName (e.g., Hunting, Cooking, Mining)"},
-          "Priority": {"type": "int", "min": 0, "max": 4}
+          "ColonistId": {
+            "type": "entity_id"
+          },
+          "WorkType": {
+            "type": "string",
+            "description": "Work type defName (e.g., Hunting, Cooking, Mining)"
+          },
+          "Priority": {
+            "type": "int",
+            "min": 0,
+            "max": 4
+          }
         }
       },
       {
         "name": "Equip",
         "description": "Have a pawn equip a weapon",
         "params": {
-          "ColonistId": {"type": "entity_id"},
-          "WeaponId": {"type": "entity_id"}
+          "ColonistId": {
+            "type": "entity_id"
+          },
+          "WeaponId": {
+            "type": "entity_id"
+          }
         }
       },
       {
         "name": "Chat",
         "description": "Initiate social interaction with target pawn",
         "params": {
-          "ColonistId": {"type": "entity_id"},
-          "TargetId": {"type": "entity_id"}
+          "ColonistId": {
+            "type": "entity_id"
+          },
+          "TargetId": {
+            "type": "entity_id"
+          }
         }
       },
       {
         "name": "DesignateHunt",
         "description": "Mark an animal for hunting",
-        "params": {"TargetId": {"type": "entity_id", "description": "Animal ThingID"}}
+        "params": {
+          "TargetId": {
+            "type": "entity_id",
+            "description": "Animal ThingID"
+          }
+        }
       },
       {
         "name": "CancelHunt",
         "description": "Remove hunting designation from an animal",
-        "params": {"TargetId": {"type": "entity_id"}}
+        "params": {
+          "TargetId": {
+            "type": "entity_id"
+          }
+        }
       },
       {
         "name": "PlaceBlueprint",
         "description": "Place a building blueprint for construction (instant for spots)",
         "params": {
-          "Building": {"type": "string", "description": "Building defName (e.g., Bed, ButcherSpot, Campfire)"},
-          "X": {"type": "int"},
-          "Y": {"type": "int"},
-          "Rotation": {"type": "int", "min": 0, "max": 3, "default": 0},
-          "Stuff": {"type": "string", "optional": true, "description": "Material defName (e.g., WoodLog, Steel)"}
+          "Building": {
+            "type": "string",
+            "description": "Building defName (e.g., Bed, ButcherSpot, Campfire)"
+          },
+          "X": {
+            "type": "int"
+          },
+          "Y": {
+            "type": "int"
+          },
+          "Rotation": {
+            "type": "int",
+            "min": 0,
+            "max": 3,
+            "default": 0
+          },
+          "Stuff": {
+            "type": "string",
+            "optional": true,
+            "description": "Material defName (e.g., WoodLog, Steel)"
+          }
         }
       },
       {
         "name": "CreateGrowingZone",
         "description": "Create a growing zone for farming",
         "params": {
-          "X": {"type": "int"},
-          "Y": {"type": "int"},
-          "Width": {"type": "int", "default": 5},
-          "Height": {"type": "int", "default": 5},
-          "Plant": {"type": "string", "optional": true, "description": "Plant defName to grow"}
+          "X": {
+            "type": "int"
+          },
+          "Y": {
+            "type": "int"
+          },
+          "Width": {
+            "type": "int",
+            "default": 5
+          },
+          "Height": {
+            "type": "int",
+            "default": 5
+          },
+          "Plant": {
+            "type": "string",
+            "optional": true,
+            "description": "Plant defName to grow"
+          }
         }
       },
       {
         "name": "CreateStockpile",
         "description": "Create a stockpile zone for storage",
         "params": {
-          "X": {"type": "int"},
-          "Y": {"type": "int"},
-          "Width": {"type": "int", "default": 5},
-          "Height": {"type": "int", "default": 5}
+          "X": {
+            "type": "int"
+          },
+          "Y": {
+            "type": "int"
+          },
+          "Width": {
+            "type": "int",
+            "default": 5
+          },
+          "Height": {
+            "type": "int",
+            "default": 5
+          }
         }
       },
       {
         "name": "DesignateCutPlants",
         "description": "Designate plants/trees in an area for cutting",
         "params": {
-          "X": {"type": "int"},
-          "Y": {"type": "int"},
-          "Radius": {"type": "int", "default": 5}
+          "X": {
+            "type": "int"
+          },
+          "Y": {
+            "type": "int"
+          },
+          "Radius": {
+            "type": "int",
+            "default": 5
+          }
         }
       },
       {
         "name": "DesignateMine",
         "description": "Designate rocks/ore in an area for mining",
         "params": {
-          "X": {"type": "int"},
-          "Y": {"type": "int"},
-          "Radius": {"type": "int", "default": 3}
+          "X": {
+            "type": "int"
+          },
+          "Y": {
+            "type": "int"
+          },
+          "Radius": {
+            "type": "int",
+            "default": 3
+          }
         }
       },
       {
         "name": "AddBill",
         "description": "Add a production bill to a workbench",
         "params": {
-          "BuildingId": {"type": "entity_id", "description": "Workbench ThingID"},
-          "Recipe": {"type": "string", "description": "Recipe defName (e.g., ButcherCorpseFlesh)"},
-          "Count": {"type": "int", "default": -1, "description": "-1 for forever, >0 for specific count"}
+          "BuildingId": {
+            "type": "entity_id",
+            "description": "Workbench ThingID"
+          },
+          "Recipe": {
+            "type": "string",
+            "description": "Recipe defName (e.g., ButcherCorpseFlesh)"
+          },
+          "Count": {
+            "type": "int",
+            "default": -1,
+            "description": "-1 for forever, >0 for specific count"
+          }
         }
       },
       {
@@ -190,15 +338,26 @@
       {
         "name": "Unforbid",
         "description": "Unforbid an item so colonists can use it",
-        "params": {"ThingId": {"type": "entity_id"}}
+        "params": {
+          "ThingId": {
+            "type": "entity_id"
+          }
+        }
       },
       {
         "name": "UnforbidArea",
         "description": "Unforbid all items in a radius",
         "params": {
-          "X": {"type": "int"},
-          "Y": {"type": "int"},
-          "Radius": {"type": "int", "default": 10}
+          "X": {
+            "type": "int"
+          },
+          "Y": {
+            "type": "int"
+          },
+          "Radius": {
+            "type": "int",
+            "default": 10
+          }
         }
       },
       {
@@ -212,77 +371,289 @@
     "description": "Full observation (first step or mode=full)",
     "type": "dict",
     "spaces": {
-      "Tick": {"type": "int", "description": "Current game tick"},
-      "ColonistCount": {"type": "int", "min": 0, "max": 50},
-      "Colonists": {"type": "sequence", "max_length": 50, "description": "Detailed colonist states"},
-      "Resources": {"type": "dict", "description": "Stockpile counts and wealth"},
-      "Weather": {"type": "string"},
-      "Season": {"type": "string"},
-      "Hour": {"type": "int", "min": 0, "max": 23},
-      "Temperature": {"type": "float"},
-      "Threats": {"type": "sequence"},
-      "Visitors": {"type": "sequence"},
-      "Entities": {"type": "dict", "description": "Categorized entity index (Colonists, Animals, Buildings, etc.)"},
-      "Alerts": {"type": "sequence", "description": "Active game alerts"},
-      "IdleColonists": {"type": "int"},
-      "LastAction": {"type": "dict", "optional": true, "description": "Feedback from last action"},
-      "Episode": {"type": "dict", "description": "Episode progress info"}
+      "Tick": {
+        "type": "int",
+        "description": "Current game tick"
+      },
+      "ColonistCount": {
+        "type": "int",
+        "min": 0,
+        "max": 50
+      },
+      "Colonists": {
+        "type": "sequence",
+        "max_length": 50,
+        "description": "Detailed colonist states"
+      },
+      "Resources": {
+        "type": "dict",
+        "description": "Stockpile counts and wealth"
+      },
+      "Weather": {
+        "type": "string"
+      },
+      "Season": {
+        "type": "string"
+      },
+      "Hour": {
+        "type": "int",
+        "min": 0,
+        "max": 23
+      },
+      "Temperature": {
+        "type": "float"
+      },
+      "Threats": {
+        "type": "sequence"
+      },
+      "Visitors": {
+        "type": "sequence"
+      },
+      "Entities": {
+        "type": "dict",
+        "description": "Categorized entity index (Colonists, Animals, Buildings, etc.)"
+      },
+      "Alerts": {
+        "type": "sequence",
+        "description": "Active game alerts"
+      },
+      "IdleColonists": {
+        "type": "int"
+      },
+      "LastAction": {
+        "type": "dict",
+        "optional": true,
+        "description": "Feedback from last action"
+      },
+      "Episode": {
+        "type": "dict",
+        "description": "Episode progress info"
+      }
     }
   },
   "delta_observation_space": {
     "description": "Delta observation (mode=minimal or mode=normal after first step)",
     "type": "dict",
     "spaces": {
-      "Tick": {"type": "int"},
-      "Hour": {"type": "int"},
-      "StateHash": {"type": "string", "description": "Hash of current full state"},
-      "PreviousHash": {"type": "string", "description": "Hash this delta is based on - validate matches your last StateHash"},
-      "LastAction": {"type": "dict", "optional": true},
-      "Alerts": {"type": "sequence"},
-      "Events": {"type": "sequence", "description": "GameEvents explaining why state changed"},
+      "Tick": {
+        "type": "int"
+      },
+      "Hour": {
+        "type": "int"
+      },
+      "StateHash": {
+        "type": "string",
+        "description": "Hash of current full state"
+      },
+      "PreviousHash": {
+        "type": "string",
+        "description": "Hash this delta is based on - validate matches your last StateHash"
+      },
+      "LastAction": {
+        "type": "dict",
+        "optional": true
+      },
+      "Alerts": {
+        "type": "sequence"
+      },
+      "Events": {
+        "type": "sequence",
+        "description": "GameEvents explaining why state changed"
+      },
       "Delta": {
         "type": "dict",
         "spaces": {
-          "Colonists": {"type": "sequence", "description": "ColonistDelta objects with only changed fields"},
-          "RemovedColonists": {"type": "sequence", "description": "IDs of colonists that died or left"},
-          "Resources": {"type": "dict", "description": "Only changed resource counts"},
-          "AddedThreats": {"type": "sequence"},
-          "RemovedThreats": {"type": "sequence"},
-          "AddedEntities": {"type": "sequence"},
-          "RemovedEntities": {"type": "sequence"}
+          "Colonists": {
+            "type": "sequence",
+            "description": "ColonistDelta objects with only changed fields"
+          },
+          "RemovedColonists": {
+            "type": "sequence",
+            "description": "IDs of colonists that died or left"
+          },
+          "Resources": {
+            "type": "dict",
+            "description": "Only changed resource counts"
+          },
+          "AddedThreats": {
+            "type": "sequence"
+          },
+          "RemovedThreats": {
+            "type": "sequence"
+          },
+          "AddedEntities": {
+            "type": "sequence"
+          },
+          "RemovedEntities": {
+            "type": "sequence"
+          }
         }
       }
     }
   },
   "reward_components": [
-    {"name": "colonist_death", "range": [-100, 0], "description": "Major penalty per colonist death"},
-    {"name": "colonist_recruited", "range": [0, 10], "description": "Bonus for recruiting new colonists"},
-    {"name": "mood", "range": [-0.1, 0.1], "description": "Average colonist mood (centered at 50%)"},
-    {"name": "hunger", "range": [-0.3, 0], "description": "Penalty for hungry colonists"},
-    {"name": "exhaustion", "range": [-0.5, 0], "description": "Penalty for exhausted colonists"},
-    {"name": "health", "range": [-0.2, 0], "description": "Penalty for injured colonists"},
-    {"name": "idle", "range": [-0.25, 0], "description": "Penalty for idle colonists"},
-    {"name": "wealth", "range": [-0.5, 0.5], "description": "Wealth change (capped)"},
-    {"name": "food_security", "range": [-0.5, 0.5], "description": "Change in days of food stockpiled"},
-    {"name": "food_critical", "range": [-0.2, 0], "description": "Continuous penalty when food < 2 days"},
-    {"name": "threat_eliminated", "range": [0, 5], "description": "Bonus for killing hostiles"},
-    {"name": "threat_appeared", "range": [-1, 0], "description": "Penalty when new hostiles appear"},
-    {"name": "wood_gathered", "range": [0, 0.2], "description": "Bonus for gathering wood"},
-    {"name": "steel_gathered", "range": [0, 0.2], "description": "Bonus for gathering steel"},
-    {"name": "research", "range": [0, 2], "description": "Bonus for research progress"},
-    {"name": "research_complete", "range": [0, 1], "description": "Bonus for completing research"},
-    {"name": "construction", "range": [0, 1], "description": "Bonus for constructing buildings"}
+    {
+      "name": "colonist_death",
+      "range": [
+        -100,
+        0
+      ],
+      "description": "Major penalty per colonist death"
+    },
+    {
+      "name": "colonist_recruited",
+      "range": [
+        0,
+        10
+      ],
+      "description": "Bonus for recruiting new colonists"
+    },
+    {
+      "name": "mood",
+      "range": [
+        -0.1,
+        0.1
+      ],
+      "description": "Average colonist mood (centered at 50%)"
+    },
+    {
+      "name": "hunger",
+      "range": [
+        -0.3,
+        0
+      ],
+      "description": "Penalty for hungry colonists"
+    },
+    {
+      "name": "exhaustion",
+      "range": [
+        -0.5,
+        0
+      ],
+      "description": "Penalty for exhausted colonists"
+    },
+    {
+      "name": "health",
+      "range": [
+        -0.2,
+        0
+      ],
+      "description": "Penalty for injured colonists"
+    },
+    {
+      "name": "idle",
+      "range": [
+        -0.25,
+        0
+      ],
+      "description": "Penalty for idle colonists"
+    },
+    {
+      "name": "wealth",
+      "range": [
+        -0.5,
+        0.5
+      ],
+      "description": "Wealth change (capped)"
+    },
+    {
+      "name": "food_security",
+      "range": [
+        -0.5,
+        0.5
+      ],
+      "description": "Change in days of food stockpiled"
+    },
+    {
+      "name": "food_critical",
+      "range": [
+        -0.2,
+        0
+      ],
+      "description": "Continuous penalty when food < 2 days"
+    },
+    {
+      "name": "threat_eliminated",
+      "range": [
+        0,
+        5
+      ],
+      "description": "Bonus for killing hostiles"
+    },
+    {
+      "name": "threat_appeared",
+      "range": [
+        -1,
+        0
+      ],
+      "description": "Penalty when new hostiles appear"
+    },
+    {
+      "name": "wood_gathered",
+      "range": [
+        0,
+        0.2
+      ],
+      "description": "Bonus for gathering wood"
+    },
+    {
+      "name": "steel_gathered",
+      "range": [
+        0,
+        0.2
+      ],
+      "description": "Bonus for gathering steel"
+    },
+    {
+      "name": "research",
+      "range": [
+        0,
+        2
+      ],
+      "description": "Bonus for research progress"
+    },
+    {
+      "name": "research_complete",
+      "range": [
+        0,
+        1
+      ],
+      "description": "Bonus for completing research"
+    },
+    {
+      "name": "construction",
+      "range": [
+        0,
+        1
+      ],
+      "description": "Bonus for constructing buildings"
+    }
   ],
   "tick_rate": 60,
   "max_episode_ticks": 900000,
   "ipc": {
-    "requires_env": ["GAMERL_INSTANCE_ID"],
-    "socket_path_template": "{TMP}/gamerl-rimworld-{GAMERL_INSTANCE_ID}.sock",
-    "socket_path_override_env": "GAMERL_SOCKET",
-    "vision_shm_template": "{TMP}/gamerl-rimworld-camera-{GAMERL_INSTANCE_ID}-{stream}.shm",
-    "vision_shm_override_env": "GAMERL_CAMERA_SHM",
-    "log_dir_template": "{TMP}/gamerl-logs/{GAMERL_INSTANCE_ID}",
+    "requires_env": [
+      "GAMERL_INSTANCE_ID",
+      "GAMERL_TCP"
+    ],
+    "transports": {
+      "tcp": {
+        "env": "GAMERL_TCP",
+        "format": "host:port",
+        "required_on": "Wine, Proton, and any runtime without AF_UNIX",
+        "notes": "AF_UNIX does not exist on Windows, so Wine answers WSAEAFNOSUPPORT and .NET Framework exposes no Socket support for it. TCP on loopback is the transport every other RimWorld bridge uses for this reason. Loopback only: a non-loopback bind is refused."
+      },
+      "unix": {
+        "env": "GAMERL_SOCKET",
+        "format": "absolute path",
+        "required_on": "macOS and native Linux"
+      }
+    },
+    "endpoint_file_env": "GAMERL_ENDPOINT_FILE",
+    "endpoint_file_template": "{TMP}/gamerl-logs/{GAMERL_INSTANCE_ID}/endpoint",
+    "ephemeral_port": "GAMERL_TCP=127.0.0.1:0 asks the OS for a free port; the mod publishes the resolved endpoint to the endpoint file so clients never have to guess it",
     "log_dir_override_env": "GAMERL_LOG_DIR",
-    "notes": "There is no global fallback path. A shared socket or framebuffer path does not fail loudly under parallel rollout: the second instance attaches to the first one's resources and the corruption surfaces later as unexplained divergence. The mod refuses to start without GAMERL_INSTANCE_ID."
+    "camera_shm_override_env": "GAMERL_CAMERA_SHM",
+    "notes": "There is no global fallback endpoint. A shared endpoint would let two colonies attach to each other's bridge, which is silent corruption rather than an error."
   }
 }

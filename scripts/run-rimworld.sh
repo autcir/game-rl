@@ -34,15 +34,21 @@ export WINEPREFIX="${WINEPREFIX:-$GAME_ROOT/prefix}"
 INSTANCE_ID="${1:-$(date +%Y%m%d-%H%M%S)}"
 export GAMERL_INSTANCE_ID="$INSTANCE_ID"
 
-SOCKET_HOST="/tmp/gamerl-rimworld-${INSTANCE_ID}.sock"
-SHM_HOST="/tmp/gamerl-rimworld-camera-${INSTANCE_ID}-{stream}.shm"
 LOG_HOST="/tmp/gamerl-logs/${INSTANCE_ID}"
 
-# Z: is the host root inside Wine, so Z:\tmp is the same file the Rust server
-# will look at as /tmp. Passing the Windows-visible spelling is what makes the
-# two sides agree.
-export GAMERL_SOCKET="Z:\\tmp\\gamerl-rimworld-${INSTANCE_ID}.sock"
-export GAMERL_LOG_DIR="Z:\\tmp\\gamerl-logs\\${INSTANCE_ID}"
+# TCP, not Unix sockets. AF_UNIX does not exist on Windows, so Wine answers
+# WSAEAFNOSUPPORT and .NET Framework exposes no Socket support for it. Wine is
+# the only way to run RimWorld on Linux, so Unix sockets are not an option here.
+#
+# Port 0 asks the OS for a free port, so two instances can never collide. The
+# mod publishes the resolved endpoint to the endpoint file below, and the Rust
+# side reads it from there rather than guessing.
+#
+# Z: is the host root inside Wine, so Z:/tmp is the same file the Rust server
+# sees as /tmp.
+export GAMERL_TCP="127.0.0.1:${GAMERL_PORT:-0}"
+export GAMERL_ENDPOINT_FILE="Z:/tmp/gamerl-logs/${INSTANCE_ID}/endpoint"
+export GAMERL_LOG_DIR="Z:/tmp/gamerl-logs/${INSTANCE_ID}"
 
 EXE=""
 for candidate in \
@@ -68,15 +74,14 @@ cat <<EOF
 instance   $INSTANCE_ID
 prefix     $WINEPREFIX
 executable $EXE
-socket     $SOCKET_HOST        (as Z:\\\\tmp inside Wine)
+tcp        127.0.0.1:${GAMERL_PORT:-0}   (0 = OS picks a free port)
+endpoint   $LOG_HOST/endpoint            (written once bound)
 log dir    $LOG_HOST
-
-RimWorld's own Player.log is Unity's, so it goes next to the others:
-  it will still be written to the prefix's LocalLow directory.
 EOF
 
 echo
-echo "launching. the bridge socket appears at $SOCKET_HOST once the mod initialises."
+echo "launching. once the mod binds, read the endpoint with:"
+echo "  cat $LOG_HOST/endpoint"
 echo
 
 exec wine "$EXE" "$@"

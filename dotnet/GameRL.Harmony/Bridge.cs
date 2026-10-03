@@ -6,6 +6,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -52,20 +53,161 @@ namespace GameRL.Harmony
         /// <summary>
         /// Start listening for connections from Rust harmony-bridge
         /// </summary>
-        public bool Listen(string socketPath)
+        public bool Listen(string endpointSpec)
         {
-            var endpointPath = socketPath;
+            var endpointPath = endpointSpec;
+
+            // host:port means TCP, anything else is a Unix socket path. The Rust
+            // side applies the identical rule in Endpoint::parse, so both ends
+            // agree on what the string means without extra configuration.
+            if (TryParseTcpEndpoint(endpointSpec, out var host, out var port))
+            {
+                return ListenTcp(host, port);
+            }
+
+            return ListenUnix(endpointSpec);
+        }
+
+        /// <summary>
+        /// Parse `host:port`, rejecting anything that is not loopback.
+        ///
+        /// This bridge can drive the colony and read the whole game state. It
+        /// listens on loopback only, so a stray configuration cannot expose it
+        /// to the network.
+        /// </summary>
+        private static bool TryParseTcpEndpoint(string spec, out string host, out int port)
+        {
+            host = "";
+            port = 0;
+            if (string.IsNullOrWhiteSpace(spec)) return false;
+
+            var idx = spec.LastIndexOf(':');
+            if (idx <= 0) return false;
+
+            var h = spec.Substring(0, idx).Trim();
+            var p = spec.Substring(idx + 1).Trim();
+
+            if (h.Length == 0 || !int.TryParse(p, out port) || port < 0 || port > 65535) return false;
+            if (h.IndexOf('/') >= 0 || h.IndexOf('\\') >= 0) return false;
+
+            if (!IPAddress.TryParse(h, out var addr) && h != "localhost")
+            {
+                return false;
+            }
+            if (h != "localhost" && IPAddress.TryParse(h, out var parsed) && !IPAddress.IsLoopback(parsed))
+            {
+                throw new InvalidOperationException(
+                    $"refusing to bind the game bridge to non-loopback address '{h}'. " +
+                    "This bridge exposes full colony state and control.");
+            }
+
+            host = h;
+            return true;
+        }
+
+        private bool ListenTcp(string host, int port)
+        {
+            IPAddress addr;
+            if (host == "localhost")
+            {
+                // Loopback only: bind v4 explicitly rather than resolving, which
+                // could pick ::1 and mismatch the client's view.
+                addr = IPAddress.Loopback;
+            }
+            else if (!IPAddress.TryParse(host, out var parsed) || !IPAddress.IsLoopback(parsed))
+            {
+                LogError($"TCP endpoint '{host}:{port}' is not loopback; refusing");
+                return false;
+            }
+            else
+            {
+                addr = parsed;
+            }
+
             try
             {
-                _socketPath = socketPath;
+                _listenSocket = new Socket(addr.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
+                _listenSocket.Bind(new IPEndPoint(addr, port));
+            }
+            catch (Exception ex)
+            {
+                LogError($"BIND FAILED on tcp {host}:{port}: {Describe(ex)}");
+                return false;
+            }
+
+            try
+            {
+                _listenSocket.Listen(1);
+            }
+            catch (Exception ex)
+            {
+                LogError($"LISTEN FAILED on tcp {host}:{port}: {Describe(ex)}");
+                return false;
+            }
+
+            var actual = ((IPEndPoint)_listenSocket.LocalEndPoint!).Port;
+            Log($"[GameRL] endpoint: tcp {addr}:{actual}");
+            AnnounceEndpoint($"tcp {addr}:{actual}");
+            return StartListener();
+        }
+
+        /// <summary>
+        /// Publish the resolved endpoint so a client can discover an ephemeral
+        /// port instead of guessing it.
+        /// </summary>
+        private void AnnounceEndpoint(string endpoint)
+        {
+            var path = Environment.GetEnvironmentVariable("GAMERL_ENDPOINT_FILE");
+            if (string.IsNullOrEmpty(path)) return;
+
+            try
+            {
+                var dir = Path.GetDirectoryName(path);
+                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+                File.WriteAllText(path, endpoint);
+            }
+            catch (Exception ex)
+            {
+                LogError($"could not write endpoint file '{path}': {Describe(ex)}");
+            }
+        }
+
+        private bool StartListener()
+        {
+            try
+            {
+                _running = true;
+                _listenThread = new Thread(ListenLoop)
+                {
+                    IsBackground = true,
+                    Name = "GameRL-Listen"
+                };
+                _listenThread.Start();
+
+                Log("Listening");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LogError($"LISTEN THREAD FAILED: {Describe(ex)}");
+                _running = false;
+                return false;
+            }
+        }
+
+        private bool ListenUnix(string endpointPath)
+        {
+            try
+            {
+                _socketPath = endpointPath;
 
                 // Remove existing socket file if present
-                if (File.Exists(socketPath))
+                if (File.Exists(endpointPath))
                 {
-                    File.Delete(socketPath);
+                    File.Delete(endpointPath);
                 }
 
-                var endpoint = new UnixEndPoint(socketPath);
+                var endpoint = new UnixEndPoint(endpointPath);
                 _listenSocket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
 
                 // Bind and Listen are separated because Mono under Wine reports a
@@ -89,25 +231,9 @@ namespace GameRL.Harmony
                 return false;
             }
 
-            try
-            {
-                _running = true;
-                _listenThread = new Thread(ListenLoop)
-                {
-                    IsBackground = true,
-                    Name = "GameRL-Listen"
-                };
-                _listenThread.Start();
-
-                Log($"Listening on {socketPath}");
-                return true;
-            }
-            catch (Exception ex)
-            {
-                LogError($"LISTEN THREAD FAILED: {Describe(ex)}");
-                _running = false;
-                return false;
-            }
+            Log($"[GameRL] endpoint: unix {endpointPath}");
+            AnnounceEndpoint($"unix {endpointPath}");
+            return StartListener();
         }
 
         /// <summary>

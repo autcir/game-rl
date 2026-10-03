@@ -8,6 +8,7 @@
 
 pub mod protocol;
 pub mod tcp;
+pub mod tcp_transport;
 pub mod transport;
 #[cfg(unix)]
 pub mod unix;
@@ -16,4 +17,7 @@ pub mod unix;
 mod lua_compat;
 
 pub use protocol::{GameCapabilities, GameMessage, StepResultPayload, deserialize, serialize};
+pub use tcp_transport::{Endpoint, TcpReadWrapper, TcpWriteWrapper};
 pub use transport::{AsyncReader, AsyncWriter, reader_task};
+#[cfg(unix)]
+pub use unix::{UnixReadWrapper, UnixWriteWrapper};

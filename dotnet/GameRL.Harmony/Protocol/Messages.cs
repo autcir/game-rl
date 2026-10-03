@@ -157,6 +157,8 @@ namespace GameRL.Harmony.Protocol
     {
         public string? EntityId { get; set; }
         public string ObservationProfile { get; set; } = "default";
+        /// "minimal", "normal" or "full". Null keeps the adapter default.
+        public string? ObservationMode { get; set; }
         public List<string> ActionMask { get; set; } = new();
         public RewardShaping? RewardShaping { get; set; }
         public Dictionary<string, object> Extra { get; set; } = new();

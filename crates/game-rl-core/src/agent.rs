@@ -39,6 +39,13 @@ pub struct AgentConfig {
     #[serde(default = "default_observation_profile")]
     pub observation_profile: String,
 
+    /// Full or delta observations: "minimal", "normal" or "full".
+    ///
+    /// Without this an adapter falls back to deltas after the first step, which
+    /// leaves a client that decides one step at a time with no colony state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observation_mode: Option<String>,
+
     /// Allowed action types
     #[serde(default)]
     pub action_mask: Vec<String>,
@@ -82,6 +89,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             entity_id: None,
+            observation_mode: None,
             observation_profile: "default".to_string(),
             action_mask: Vec::new(),
             reward_shaping: None,

@@ -12,6 +12,7 @@
 
 use anyhow::{Result, bail};
 use factorio_bridge::{FactorioBridge, FactorioConfig};
+use game_bridge::Endpoint;
 use game_rl_server::{GameEnvironment, GameRLServer};
 use harmony_bridge::HarmonyBridge;
 use std::path::{Path, PathBuf};
@@ -34,37 +35,60 @@ const RIMWORLD_SOCKET_PREFIX: &str = "gamerl-rimworld-";
 const RIMWORLD_SOCKET_SUFFIX: &str = ".sock";
 const FACTORIO_RCON_ADDR: &str = "127.0.0.1:27015";
 
-/// Resolve the RimWorld IPC socket.
+/// Resolve the RimWorld bridge endpoint.
 ///
-/// `explicit` comes from `--socket` and wins outright. Otherwise
-/// `GAMERL_INSTANCE_ID` selects one instance's socket. With neither we refuse to
-/// start rather than fall back to a shared path: under parallel rollout a shared
-/// path silently attaches to whichever instance is there, and the resulting data
-/// is contaminated rather than broken.
+/// Order matters and mirrors the C# side exactly, so both ends agree without
+/// extra configuration:
 ///
-/// When several instances are live, every candidate socket is returned so the
-/// caller can report them instead of guessing by mtime.
-fn resolve_rimworld_sockets(explicit: Option<&str>) -> Result<Vec<std::path::PathBuf>> {
-    if let Some(p) = explicit {
-        return Ok(vec![PathBuf::from(p)]);
+///   1. `--endpoint`
+///   2. `GAMERL_TCP`
+///   3. `GAMERL_SOCKET`
+///   4. `GAMERL_ENDPOINT_FILE`, which the mod writes once it has bound. This is
+///      how an ephemeral port (`:0`) gets discovered.
+///   5. a single live Unix socket, only when there is exactly one
+///
+/// Anything ambiguous fails with the candidate list rather than picking by
+/// modification time, which is how a parallel run silently attaches to the
+/// wrong colony.
+fn resolve_rimworld_endpoints(explicit: Option<&str>) -> Result<Vec<String>> {
+    if let Some(e) = explicit {
+        return Ok(vec![e.to_string()]);
     }
 
-    if let Ok(id) = std::env::var("GAMERL_INSTANCE_ID")
-        && !id.trim().is_empty()
+    if let Ok(v) = std::env::var("GAMERL_TCP")
+        && !v.trim().is_empty()
     {
-        let p = std::env::temp_dir().join(format!(
-            "{RIMWORLD_SOCKET_PREFIX}{id}{RIMWORLD_SOCKET_SUFFIX}"
-        ));
-        return Ok(vec![p]);
+        return Ok(vec![v.trim().to_string()]);
     }
 
-    let live: Vec<std::path::PathBuf> = std::env::temp_dir()
+    if let Ok(v) = std::env::var("GAMERL_SOCKET")
+        && !v.trim().is_empty()
+    {
+        return Ok(vec![v.trim().to_string()]);
+    }
+
+    if let Ok(path) = std::env::var("GAMERL_ENDPOINT_FILE")
+        && let Ok(contents) = std::fs::read_to_string(&path)
+    {
+        let raw = contents.trim();
+        if !raw.is_empty() {
+            // The mod writes "tcp host:port" or "unix /path".
+            return Ok(vec![match raw.split_once(char::is_whitespace) {
+                Some((kind, rest)) if kind.eq_ignore_ascii_case("unix") => rest.to_string(),
+                Some((kind, rest)) if kind.eq_ignore_ascii_case("tcp") => rest.to_string(),
+                _ => raw.to_string(),
+            }]);
+        }
+    }
+
+    let live: Vec<String> = std::env::temp_dir()
         .read_dir()
         .map(|rd| {
             rd.flatten()
-                .map(|e| e.path())
+                .map(|e| e.path().display().to_string())
                 .filter(|p| {
-                    p.file_name()
+                    Path::new(p)
+                        .file_name()
                         .and_then(|n| n.to_str())
                         .map(|n| {
                             n.starts_with(RIMWORLD_SOCKET_PREFIX)
@@ -76,25 +100,15 @@ fn resolve_rimworld_sockets(explicit: Option<&str>) -> Result<Vec<std::path::Pat
         })
         .unwrap_or_default();
 
-    if live.len() == 1 {
-        return Ok(live);
+    match live.len() {
+        1 => Ok(live),
+        0 => Ok(Vec::new()),
+        n => bail!(
+            "{n} RimWorld instances are live ({}) and none was selected. Refusing to guess: \
+             set GAMERL_TCP, or pass --endpoint <host:port>.",
+            live.join(", ")
+        ),
     }
-
-    if live.is_empty() {
-        // No socket yet: the game may simply not have launched. An empty target
-        // list means "keep waiting", not "pick something".
-        return Ok(Vec::new());
-    }
-
-    bail!(
-        "{} RimWorld instances are live ({}) and none was selected. Refusing to guess: \
-         set GAMERL_INSTANCE_ID or pass --socket <path>.",
-        live.len(),
-        live.iter()
-            .map(|p| p.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
 }
 
 /// Run the MCP server with a game bridge
@@ -111,15 +125,17 @@ fn get_mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).ok()?.modified().ok()
 }
 
-/// `--socket <path>`, or None.
-fn parse_socket_arg() -> Option<String> {
+/// `--endpoint <host:port|path>`, or the older `--socket <path>`. None otherwise.
+fn parse_endpoint_arg() -> Option<String> {
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
-        if a == "--socket" {
-            return args.next();
-        }
-        if let Some(v) = a.strip_prefix("--socket=") {
-            return Some(v.to_string());
+        for flag in ["--endpoint", "--socket"] {
+            if a == flag {
+                return args.next();
+            }
+            if let Some(v) = a.strip_prefix(&format!("{flag}=")) {
+                return Some(v.to_string());
+            }
         }
     }
     None
@@ -134,10 +150,10 @@ async fn main() -> Result<()> {
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
-    let explicit = parse_socket_arg();
+    let explicit = parse_endpoint_arg();
     // Resolve once: ambiguity must be reported before we start polling, not
     // silently resolved by mtime later.
-    let rimworld_sockets = resolve_rimworld_sockets(explicit.as_deref())?;
+    let rimworld_endpoints = resolve_rimworld_endpoints(explicit.as_deref())?;
 
     info!("Game-RL MCP server starting (auto-detecting game)...");
 
@@ -151,12 +167,19 @@ async fn main() -> Result<()> {
         let mut candidates: Vec<GameCandidate> = Vec::new();
 
         // Check all potential game sources
-        for sock in &rimworld_sockets {
-            if let Some(mtime) = get_mtime(sock) {
+        // TCP endpoints are not files, so they are probed by connection rather
+        // than by mtime.
+        for ep in &rimworld_endpoints {
+            let ready = match Endpoint::parse(ep) {
+                Ok(Endpoint::Tcp(addr)) => tokio::net::TcpStream::connect(&addr).await.is_ok(),
+                Ok(Endpoint::Unix(path)) => Path::new(&path).exists(),
+                Err(_) => false,
+            };
+            if ready {
                 candidates.push(GameCandidate {
                     name: "RimWorld",
-                    modified: mtime,
-                    sock: Some(sock.clone()),
+                    modified: SystemTime::now(),
+                    sock: Some(PathBuf::from(ep)),
                 });
             }
         }
@@ -195,7 +218,13 @@ async fn main() -> Result<()> {
                     };
                     let sock = sock.display().to_string();
                     info!("RimWorld socket detected: {}", sock);
-                    let mut bridge = HarmonyBridge::new(&sock);
+                    let mut bridge = match HarmonyBridge::new(&sock) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            warn!("RimWorld endpoint '{sock}' is not usable: {e}");
+                            continue;
+                        }
+                    };
                     match bridge.connect().await {
                         Ok(()) => return run_with_bridge(bridge).await,
                         Err(e) => warn!("RimWorld socket exists but connect failed: {}", e),
@@ -223,14 +252,14 @@ async fn main() -> Result<()> {
 
         if candidates.is_empty() {
             info!("Waiting for game connection...");
-            if rimworld_sockets.is_empty() {
+            if rimworld_endpoints.is_empty() {
                 info!(
-                    "  RimWorld: no socket yet and no GAMERL_INSTANCE_ID set. If more than one \
-                     instance will run, set it now so this server attaches to the right one."
+                    "  RimWorld: no endpoint configured and none live. Set GAMERL_TCP=127.0.0.1:<port> \
+                     (required on Wine/Proton), or GAMERL_ENDPOINT_FILE for an ephemeral port."
                 );
             } else {
-                for s in &rimworld_sockets {
-                    info!("  RimWorld: socket at {}", s.display());
+                for e in &rimworld_endpoints {
+                    info!("  RimWorld: endpoint {e}");
                 }
             }
             info!("  Zomboid:  file at {:?}", zomboid_response);

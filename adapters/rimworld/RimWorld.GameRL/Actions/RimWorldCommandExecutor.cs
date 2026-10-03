@@ -53,20 +53,14 @@ namespace RimWorld.GameRL.Actions
             _rpc.RegisterAll(Assembly.GetExecutingAssembly());
         }
 
-        public bool RegisterAgent(string agentId, string agentType, Dictionary<string, object> config)
+        /// <summary>
+        /// Apply observation settings from a config dictionary.
+        ///
+        /// Shared by initial registration and re-registration so both paths
+        /// interpret the config identically.
+        /// </summary>
+        private static void ApplyObservationConfig(AgentInfo info, Dictionary<string, object> config)
         {
-            if (_agents.ContainsKey(agentId))
-            {
-                Log.Message($"[GameRL] Agent already registered: {agentId} ({agentType})");
-                return true;
-            }
-
-            var info = new AgentInfo
-            {
-                AgentType = agentType,
-                Config = config
-            };
-
             // Parse ObservationMode from config
             if (config.TryGetValue("ObservationMode", out var modeObj) && modeObj is string modeStr)
             {
@@ -110,6 +104,29 @@ namespace RimWorld.GameRL.Actions
                     ? DeltaConfig.Minimal
                     : DeltaConfig.Normal;
             }
+        }
+
+        public bool RegisterAgent(string agentId, string agentType, Dictionary<string, object> config)
+        {
+            // Re-registration applies the new config rather than returning early.
+            // Returning early locked in whatever the first caller asked for, so a
+            // client could never switch observation mode without restarting the
+            // game. Runtime state such as FirstObservation is deliberately kept.
+            if (_agents.TryGetValue(agentId, out var existing))
+            {
+                Log.Message($"[GameRL] Agent already registered: {agentId} ({agentType}), applying new config");
+                existing.Config = config;
+                ApplyObservationConfig(existing, config);
+                return true;
+            }
+
+            var info = new AgentInfo
+            {
+                AgentType = agentType,
+                Config = config
+            };
+
+            ApplyObservationConfig(info, config);
 
             _agents[agentId] = info;
 

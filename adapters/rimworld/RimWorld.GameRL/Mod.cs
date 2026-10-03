@@ -78,11 +78,13 @@ namespace RimWorld.GameRL
                 _commandExecutor = new RimWorldCommandExecutor();
 
                 // Start listening for harmony-server connection
-                var socketPath = GetSocketPath();
+                Environment.SetEnvironmentVariable("GAMERL_ENDPOINT_FILE", EndpointFilePath());
+
+                var endpoint = GetListenEndpoint();
                 Log.Message(
-                    $"[GameRL] instance={InstanceId()} socket={socketPath} " +
+                    $"[GameRL] instance={InstanceId()} endpoint={endpoint} " +
                     $"log_dir={InstanceLogDir()}");
-                Log.Message($"[GameRL] Starting IPC server on {socketPath}...");
+                Log.Message($"[GameRL] Starting IPC server on {endpoint}...");
 
                 _bridge = new RimWorldBridge();
 
@@ -96,7 +98,7 @@ namespace RimWorld.GameRL
                 _bridge.OnShutdown += HandleShutdown;
                 _bridge.OnClientConnected += HandleClientConnected;
 
-                if (_bridge.Listen(socketPath))
+                if (_bridge.Listen(endpoint))
                 {
                     Log.Message("[GameRL] IPC server started, waiting for harmony-bridge connection...");
                 }
@@ -111,15 +113,46 @@ namespace RimWorld.GameRL
             }
         }
 
-        private static string GetSocketPath()
+        /// <summary>
+        /// Where the bridge should listen.
+        ///
+        /// Order matters. GAMERL_TCP wins because it is the only transport that
+        /// works on Wine and Proton: .NET Framework exposes no AF_UNIX support,
+        /// and Wine answers WSAEAFNOSUPPORT for the family, so the Unix path
+        /// cannot bind there at all.
+        ///
+        /// Still no derived default. A shared endpoint would let two colonies
+        /// attach to each other's bridge, which is silent corruption rather than
+        /// an error.
+        /// </summary>
+        private static string GetListenEndpoint()
         {
-            // Explicit override wins, but it is still per-instance by contract:
-            // the launcher is responsible for making it unique.
-            var envPath = Environment.GetEnvironmentVariable("GAMERL_SOCKET");
+            var tcp = Environment.GetEnvironmentVariable("GAMERL_TCP");
+            if (!string.IsNullOrEmpty(tcp))
+                return tcp.Trim();
+
+            var unix = Environment.GetEnvironmentVariable("GAMERL_SOCKET");
+            if (!string.IsNullOrEmpty(unix))
+                return unix.Trim();
+
+            throw new InvalidOperationException(
+                "Neither GAMERL_TCP nor GAMERL_SOCKET is set. game-rl does not fall back to a " +
+                "shared endpoint. Set GAMERL_TCP=127.0.0.1:<port> (required on Wine/Proton, " +
+                "where AF_UNIX is unavailable), or GAMERL_SOCKET to an absolute path on a " +
+                "runtime that supports Unix sockets. Port 0 asks the OS for a free port, " +
+                "which is then published to GAMERL_ENDPOINT_FILE.");
+        }
+
+        /// <summary>
+        /// Per-instance endpoint file, so a client can discover an ephemeral port.
+        /// </summary>
+        internal static string EndpointFilePath()
+        {
+            var envPath = Environment.GetEnvironmentVariable("GAMERL_ENDPOINT_FILE");
             if (!string.IsNullOrEmpty(envPath))
                 return envPath;
 
-            return Path.Combine(Path.GetTempPath(), $"gamerl-rimworld-{InstanceId()}.sock");
+            return Path.Combine(InstanceLogDir(), "endpoint");
         }
 
         private static string GetCameraShmPath(string streamId)
@@ -205,6 +238,18 @@ namespace RimWorld.GameRL
                 if (msg.Config.EntityId != null)
                     config["entity_id"] = msg.Config.EntityId;
                 config["observation_profile"] = msg.Config.ObservationProfile;
+
+                // Forwarded because the adapter defaults to delta observations,
+                // which leaves a client deciding one step at a time with no state.
+                if (!string.IsNullOrEmpty(msg.Config.ObservationMode))
+                    config["ObservationMode"] = msg.Config.ObservationMode;
+
+                // Extra carries adapter-specific keys such as DeltaConfig.
+                if (msg.Config.Extra != null)
+                {
+                    foreach (var kv in msg.Config.Extra)
+                        config[kv.Key] = kv.Value;
+                }
 
                 if (_commandExecutor!.RegisterAgent(msg.AgentId, msg.AgentType, config))
                 {

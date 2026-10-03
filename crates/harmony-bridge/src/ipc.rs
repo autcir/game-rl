@@ -4,8 +4,10 @@ use async_trait::async_trait;
 #[cfg(unix)]
 use game_bridge::reader_task;
 #[cfg(unix)]
-use game_bridge::unix::{UnixReadWrapper, UnixWriteWrapper};
-use game_bridge::{AsyncWriter, GameCapabilities, GameMessage, StepResultPayload, serialize};
+use game_bridge::{
+    AsyncWriter, Endpoint, GameCapabilities, GameMessage, StepResultPayload, TcpReadWrapper,
+    TcpWriteWrapper, serialize,
+};
 use game_rl_core::{
     Action, AgentConfig, AgentId, AgentManifest, AgentType, GameManifest, GameRLError, Observation,
     Result, StepResult, StreamDescriptor,
@@ -19,8 +21,8 @@ use tracing::{debug, info, warn};
 
 /// Bridge to a .NET game via IPC
 pub struct HarmonyBridge {
-    /// Path to the socket/pipe
-    socket_path: String,
+    /// Resolved once at startup: this bridge never guesses between instances
+    endpoint: Endpoint,
     /// Writer half of the connection
     writer: Arc<Mutex<Option<Box<dyn AsyncWriter>>>>,
     /// Channel to send requests to the reader task
@@ -38,14 +40,20 @@ pub struct HarmonyBridge {
 }
 
 impl HarmonyBridge {
-    /// Create a new bridge (not connected yet)
-    pub fn new(socket_path: &str) -> Self {
+    /// Create a new bridge (not connected yet).
+    ///
+    /// The endpoint is resolved here rather than at connect time so an
+    /// unparseable or empty value fails at construction.
+    pub fn new(endpoint: &str) -> Result<Self> {
+        let endpoint = Endpoint::parse(endpoint)?;
+        info!("Bridge target: {}", endpoint.describe());
+
         // Create channels
         let (request_tx, _request_rx) = mpsc::channel(16);
         let (event_tx, _) = broadcast::channel(64);
 
-        Self {
-            socket_path: socket_path.to_string(),
+        Ok(Self {
+            endpoint,
             writer: Arc::new(Mutex::new(None)),
             request_tx,
             event_tx,
@@ -53,50 +61,63 @@ impl HarmonyBridge {
             game_name: "Unknown".into(),
             game_version: "0.0.0".into(),
             _reader_handle: None,
-        }
+        })
     }
 
     /// Connect to the game process
     pub async fn connect(&mut self) -> Result<()> {
-        info!("Connecting to game at {}", self.socket_path);
+        info!("Connecting to game via {}", self.endpoint.describe());
 
-        // Platform-specific connection
-        #[cfg(unix)]
-        {
-            use tokio::net::UnixStream;
-            let stream = UnixStream::connect(&self.socket_path)
-                .await
-                .map_err(|e| GameRLError::IpcError(format!("Failed to connect: {}", e)))?;
+        // Build reader/writer halves for whichever transport was resolved. The
+        // two wrappers are byte-for-byte equivalent; only the stream differs.
+        let writer: Box<dyn AsyncWriter>;
 
-            // Split into read/write halves
-            let (read_half, write_half) = stream.into_split();
+        let reader_task_handle: tokio::task::JoinHandle<()> = match self.endpoint.clone() {
+            #[cfg(unix)]
+            Endpoint::Unix(path) => {
+                #[cfg(unix)]
+                use game_bridge::{UnixReadWrapper, UnixWriteWrapper};
+                use tokio::net::UnixStream;
 
-            // Store writer
-            {
-                let mut guard = self.writer.lock().await;
-                *guard = Some(Box::new(UnixWriteWrapper(write_half)));
+                let stream = UnixStream::connect(&path).await.map_err(|e| {
+                    GameRLError::IpcError(format!("Failed to connect to unix socket {path}: {e}"))
+                })?;
+                let (read_half, write_half) = stream.into_split();
+                writer = Box::new(UnixWriteWrapper(write_half));
+
+                let (request_tx, request_rx) = mpsc::channel(16);
+                self.request_tx = request_tx;
+                let event_tx = self.event_tx.clone();
+                tokio::spawn(reader_task(
+                    UnixReadWrapper(read_half),
+                    request_rx,
+                    event_tx,
+                ))
             }
+            Endpoint::Tcp(addr) => {
+                use tokio::net::TcpStream;
 
-            // Create new channels for this connection
-            let (request_tx, request_rx) = mpsc::channel(16);
-            self.request_tx = request_tx;
+                let stream = TcpStream::connect(&addr).await.map_err(|e| {
+                    GameRLError::IpcError(format!("Failed to connect to tcp {addr}: {e}"))
+                })?;
+                // The bridge is loopback-only by construction; Nagle would add
+                // latency to a request/response protocol with small messages.
+                let _ = stream.set_nodelay(true);
+                let (read_half, write_half) = stream.into_split();
+                writer = Box::new(TcpWriteWrapper(write_half));
 
-            // Spawn background reader task
-            let event_tx = self.event_tx.clone();
-            let handle = tokio::spawn(reader_task(
-                UnixReadWrapper(read_half),
-                request_rx,
-                event_tx,
-            ));
-            self._reader_handle = Some(handle);
-        }
+                let (request_tx, request_rx) = mpsc::channel(16);
+                self.request_tx = request_tx;
+                let event_tx = self.event_tx.clone();
+                tokio::spawn(reader_task(TcpReadWrapper(read_half), request_rx, event_tx))
+            }
+        };
 
-        #[cfg(not(unix))]
         {
-            Err(GameRLError::IpcError(
-                "Only Unix sockets are supported (Windows named pipes not yet implemented)".into(),
-            ))
+            let mut guard = self.writer.lock().await;
+            *guard = Some(writer);
         }
+        self._reader_handle = Some(reader_task_handle);
 
         #[cfg(unix)]
         {
