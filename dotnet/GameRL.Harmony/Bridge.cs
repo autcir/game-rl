@@ -7,6 +7,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using GameRL.Harmony.Protocol;
@@ -53,6 +54,7 @@ namespace GameRL.Harmony
         /// </summary>
         public bool Listen(string socketPath)
         {
+            var endpointPath = socketPath;
             try
             {
                 _socketPath = socketPath;
@@ -65,9 +67,30 @@ namespace GameRL.Harmony
 
                 var endpoint = new UnixEndPoint(socketPath);
                 _listenSocket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
-                _listenSocket.Bind(endpoint);
-                _listenSocket.Listen(1);
 
+                // Bind and Listen are separated because Mono under Wine reports a
+                // bare "Error looking up error string" for either, which makes
+                // "AF_UNIX unsupported" and "path not writable" indistinguishable.
+                _listenSocket.Bind(endpoint);
+            }
+            catch (Exception ex)
+            {
+                LogError($"BIND FAILED on '{endpointPath}': {Describe(ex)}");
+                return false;
+            }
+
+            try
+            {
+                _listenSocket.Listen(1);
+            }
+            catch (Exception ex)
+            {
+                LogError($"LISTEN FAILED on '{endpointPath}': {Describe(ex)}");
+                return false;
+            }
+
+            try
+            {
                 _running = true;
                 _listenThread = new Thread(ListenLoop)
                 {
@@ -81,9 +104,41 @@ namespace GameRL.Harmony
             }
             catch (Exception ex)
             {
-                LogError($"Listen failed: {ex.Message}");
+                LogError($"LISTEN THREAD FAILED: {Describe(ex)}");
+                _running = false;
                 return false;
             }
+        }
+
+        /// <summary>
+        /// Expand an exception into something actionable.
+        ///
+        /// <see cref="Exception.Message"/> alone is not enough here: Mono under
+        /// Wine cannot map the native errno for socket calls and returns
+        /// "Error looking up error string", which rules out every diagnosis.
+        /// </summary>
+        private static string Describe(Exception ex)
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.Append(ex.GetType().FullName).Append(": ").Append(ex.Message);
+
+            if (ex is SocketException se)
+            {
+                sb.Append(" | SocketErrorCode=").Append(se.SocketErrorCode)
+                  .Append(" ErrorCode=").Append(se.ErrorCode)
+                  .Append(" NativeErrorCode=").Append(se.NativeErrorCode);
+            }
+            sb.Append(" | HResult=0x").Append(ex.HResult.ToString("X8"));
+            sb.Append(" | errno=").Append(Marshal.GetLastWin32Error());
+
+            var inner = ex.InnerException;
+            while (inner != null)
+            {
+                sb.Append(" || inner ").Append(inner.GetType().FullName)
+                  .Append(": ").Append(inner.Message);
+                inner = inner.InnerException;
+            }
+            return sb.ToString();
         }
 
         /// <summary>
