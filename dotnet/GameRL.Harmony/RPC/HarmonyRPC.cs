@@ -31,8 +31,16 @@ namespace GameRL.Harmony.RPC
         public bool Success { get; set; }
         public string? ErrorMessage { get; set; }
 
+        /// <summary>
+        /// Why the dispatch failed, so callers can distinguish "you named an action
+        /// that does not exist" from "you misspelled a parameter" from "the target
+        /// id is not on the map". Without this every failure looked alike.
+        /// </summary>
+        public string? Code { get; set; }
+
         public static DispatchResult Ok() => new DispatchResult { Success = true };
-        public static DispatchResult Fail(string message) => new DispatchResult { Success = false, ErrorMessage = message };
+        public static DispatchResult Fail(string message, string code = "InternalError") =>
+            new DispatchResult { Success = false, ErrorMessage = message, Code = code };
     }
 
     /// <summary>
@@ -138,7 +146,7 @@ namespace GameRL.Harmony.RPC
                 var available = string.Join(", ", _actions.Keys.OrderBy(k => k));
                 var msg = $"Unknown action '{actionName}'. Available: {available}";
                 _logError($"[HarmonyRPC] {msg}");
-                return DispatchResult.Fail(msg);
+                return DispatchResult.Fail(msg, "UnknownAction");
             }
 
             try
@@ -149,7 +157,10 @@ namespace GameRL.Harmony.RPC
                 // Check if there was an error logged during parameter binding
                 if (_lastError != null)
                 {
-                    return DispatchResult.Fail(_lastError);
+                    var code = _lastError.Contains("Missing required parameter") ? "InvalidParameter"
+                        : _lastError.Contains("not found") ? "TargetNotFound"
+                        : "InternalError";
+                    return DispatchResult.Fail(_lastError, code);
                 }
 
                 return DispatchResult.Ok();
@@ -158,14 +169,78 @@ namespace GameRL.Harmony.RPC
             {
                 var msg = $"Action '{actionName}' threw exception: {ex.InnerException?.Message ?? ex.Message}";
                 _logError($"[HarmonyRPC] {msg}");
-                return DispatchResult.Fail(msg);
+                return DispatchResult.Fail(msg, "InternalError");
             }
             catch (Exception ex)
             {
                 var msg = $"Failed to dispatch '{actionName}': {ex.Message}";
                 _logError($"[HarmonyRPC] {msg}");
-                return DispatchResult.Fail(msg);
+                return DispatchResult.Fail(msg, "InvalidParameter");
             }
+        }
+
+        /// <summary>
+        /// Describe every registered action with its real parameter contract.
+        ///
+        /// Derived from the same reflection the dispatcher uses, so it cannot drift
+        /// from the implementation. A hardcoded action list is how a client ends up
+        /// inventing parameter names and silently getting a successful no-op.
+        /// </summary>
+        public List<Dictionary<string, object>> DescribeActions()
+        {
+            var result = new List<Dictionary<string, object>>();
+
+            foreach (var name in _actions.Keys.OrderBy(k => k))
+            {
+                var info = _actions[name];
+                var attr = info.Method.GetCustomAttribute<GameRLActionAttribute>();
+                var pars = new List<Dictionary<string, object>>();
+
+                foreach (var p in info.Parameters)
+                {
+                    var pAttr = p.GetCustomAttribute<GameRLParamAttribute>();
+                    var jsonKey = pAttr?.Name ?? p.Name ?? "";
+
+                    var entry = new Dictionary<string, object>
+                    {
+                        ["name"] = jsonKey,
+                        ["type"] = FriendlyTypeName(p.ParameterType),
+                        ["required"] = !p.HasDefaultValue,
+                        ["resolved_from_id"] = _resolvers.ContainsKey(p.ParameterType),
+                    };
+                    if (p.HasDefaultValue)
+                    {
+                        entry["default"] = p.DefaultValue?.ToString();
+                    }
+                    pars.Add(entry);
+                }
+
+                result.Add(new Dictionary<string, object>
+                {
+                    ["name"] = name,
+                    ["description"] = attr?.Description ?? "",
+                    ["params"] = pars,
+                });
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Type name as a client should see it. <see cref="Type.Name"/> alone makes
+        /// Nullable<int> and int indistinguishable.
+        /// </summary>
+        private static string FriendlyTypeName(Type t)
+        {
+            var underlying = Nullable.GetUnderlyingType(t);
+            if (underlying != null)
+                return $"{FriendlyTypeName(underlying)}?";
+
+            if (!t.IsGenericType)
+                return t.Name;
+
+            var args = string.Join(",", t.GetGenericArguments().Select(FriendlyTypeName));
+            return $"{t.Name.Split('`')[0]}<{args}>";
         }
 
         /// <summary>
@@ -199,18 +274,14 @@ namespace GameRL.Harmony.RPC
                         continue;
                     }
 
-                    // Required parameter is missing - check if we have a resolver for this type
-                    // This catches cases like Draft with TargetId instead of ColonistId
-                    if (_resolvers.ContainsKey(paramType))
-                    {
-                        var msg = $"Missing required parameter '{jsonKey}' ({paramType.Name}). Check the action's parameter names.";
-                        _logError($"[HarmonyRPC] {msg}");
-                        _lastError = msg;
-                        args[i] = null;
-                        continue;
-                    }
-
-                    // Use default for non-resolvable types
+                    // Required parameter is missing. This is always an error, even
+                    // for a plain string: silently substituting a default meant an
+                    // action with a misspelled parameter name ran against empty
+                    // arguments and reported success.
+                    var msg = $"Missing required parameter '{jsonKey}' for action '{actionInfo.Name}'. "
+                              + $"Supplied: {(parameters.Count == 0 ? "(none)" : string.Join(", ", parameters.Keys))}.";
+                    _logError($"[HarmonyRPC] {msg}");
+                    _lastError = msg;
                     args[i] = GetDefaultValue(paramType);
                     continue;
                 }

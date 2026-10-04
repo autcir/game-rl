@@ -39,6 +39,7 @@ namespace GameRL.Harmony
         public event Action<ConfigureStreamsMessage>? OnConfigureStreams;
         public event Action<ResetMessage>? OnReset;
         public event Action<GetStateHashMessage>? OnGetStateHash;
+        public event Action? OnListActions;
         public event Action? OnShutdown;
         public event Action? OnClientConnected;
 
@@ -411,6 +412,7 @@ namespace GameRL.Harmony
                     "ConfigureStreams" => ParseConfigureStreams(obj),
                     "Reset" => ParseReset(obj),
                     "GetStateHash" => new GetStateHashMessage(),
+                    "ListActions" => new ListActionsMessage(),
                     "Shutdown" => new ShutdownMessage(),
                     _ => null
                 };
@@ -534,6 +536,9 @@ namespace GameRL.Harmony
                         case GetStateHashMessage m:
                             OnGetStateHash?.Invoke(m);
                             break;
+                        case ListActionsMessage:
+                            OnListActions?.Invoke();
+                            break;
                         case ShutdownMessage:
                             OnShutdown?.Invoke();
                             break;
@@ -636,6 +641,11 @@ namespace GameRL.Harmony
         /// <summary>
         /// Send state hash response
         /// </summary>
+        public void SendActionsListed(List<Dictionary<string, object>> actions)
+        {
+            Send(new ActionsListedMessage { Actions = actions });
+        }
+
         public void SendStateHash(string hash)
         {
             Send(new StateHashMessage
@@ -752,6 +762,10 @@ namespace GameRL.Harmony
 
                 case StateHashMessage m:
                     obj["Hash"] = m.Hash;
+                    break;
+
+                case ActionsListedMessage m:
+                    obj["Actions"] = JToken.FromObject(m.Actions ?? new List<Dictionary<string, object>>());
                     break;
 
                 case StreamsConfiguredMessage m:

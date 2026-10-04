@@ -43,6 +43,14 @@ pub trait GameEnvironment: Send + Sync + 'static {
     /// Get current state hash for determinism verification
     async fn state_hash(&mut self) -> Result<String>;
 
+    /// The action catalogue the adapter actually implements.
+    ///
+    /// Sourced from the adapter's own reflection rather than a static list, so a
+    /// client cannot act on a parameter name that does not exist.
+    async fn list_actions(&mut self) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({ "actions": [] }))
+    }
+
     /// Configure vision streams
     async fn configure_streams(
         &mut self,

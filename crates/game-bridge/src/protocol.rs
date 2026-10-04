@@ -93,6 +93,12 @@ pub enum GameMessage {
         hash: String,
     },
 
+    /// The real action contract, from the adapter's own reflection
+    ActionsListed {
+        #[serde(rename = "Actions")]
+        actions: Vec<serde_json::Value>,
+    },
+
     /// Vision streams configured
     StreamsConfigured {
         #[serde(rename = "AgentId")]
@@ -146,6 +152,9 @@ pub enum GameMessage {
 
     /// Request state hash
     GetStateHash,
+
+    /// Request the action catalogue with real parameter names and types
+    ListActions,
 
     /// Configure vision streams
     ConfigureStreams {

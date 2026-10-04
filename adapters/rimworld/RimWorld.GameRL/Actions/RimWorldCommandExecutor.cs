@@ -106,6 +106,11 @@ namespace RimWorld.GameRL.Actions
             }
         }
 
+        /// <summary>
+        /// The real action contract, from the same reflection the dispatcher uses.
+        /// </summary>
+        public List<Dictionary<string, object>> DescribeActions() => _rpc.DescribeActions();
+
         public bool RegisterAgent(string agentId, string agentType, Dictionary<string, object> config)
         {
             // Re-registration applies the new config rather than returning early.

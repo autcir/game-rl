@@ -184,6 +184,19 @@ impl HarmonyBridge {
             .map_err(|_| GameRLError::IpcError("Reader task died waiting for response".into()))?
     }
 
+    /// Ask the adapter what actions it actually supports.
+    ///
+    /// Read from reflection rather than a manifest, so the contract cannot drift
+    /// from the dispatcher.
+    pub async fn list_actions(&mut self) -> Result<serde_json::Value> {
+        match self.request(GameMessage::ListActions).await? {
+            GameMessage::ActionsListed { actions } => Ok(serde_json::Value::Array(actions)),
+            other => Err(GameRLError::ProtocolError(format!(
+                "Expected ActionsListed, got {other:?}"
+            ))),
+        }
+    }
+
     /// Send a message without waiting for response (fire-and-forget)
     async fn send(&mut self, msg: GameMessage) -> Result<()> {
         let data = serialize(&msg).map_err(|e| GameRLError::SerializationError(e.to_string()))?;
@@ -298,6 +311,10 @@ impl GameEnvironment for HarmonyBridge {
             ))),
             _ => Err(GameRLError::ProtocolError("Unexpected response".into())),
         }
+    }
+
+    async fn list_actions(&mut self) -> Result<serde_json::Value> {
+        HarmonyBridge::list_actions(self).await
     }
 
     async fn state_hash(&mut self) -> Result<String> {

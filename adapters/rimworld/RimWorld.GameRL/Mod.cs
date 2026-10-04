@@ -100,6 +100,7 @@ namespace RimWorld.GameRL
                 _bridge.OnConfigureStreams += HandleConfigureStreams;
                 _bridge.OnReset += HandleReset;
                 _bridge.OnGetStateHash += HandleGetStateHash;
+                _bridge.OnListActions += HandleListActions;
                 _bridge.OnShutdown += HandleShutdown;
                 _bridge.OnClientConnected += HandleClientConnected;
 
@@ -346,6 +347,20 @@ namespace RimWorld.GameRL
                 _tickMs = _tickWatch.Elapsed.TotalMilliseconds;
                 _forcingTicks = false;
             }
+        }
+
+        /// <summary>
+        /// Publish the real action contract.
+        ///
+        /// The manifest lists 22 actions while the adapter registers more, and a
+        /// misspelled parameter used to produce a successful no-op. A client that
+        /// has to guess is a client that learns from false positives.
+        /// </summary>
+        private static void HandleListActions()
+        {
+            var actions = _commandExecutor?.DescribeActions() ?? new List<Dictionary<string, object>>();
+            Log.Message($"[GameRL] Listing {actions.Count} actions");
+            _bridge?.SendActionsListed(actions);
         }
 
         private static void HandleReset(ResetMessage msg)

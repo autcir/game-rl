@@ -80,6 +80,17 @@ namespace GameRL.Harmony.Protocol
         public StepMetricsMessage? Metrics { get; set; }
     }
 
+    public class ListActionsMessage : GameMessage
+    {
+        public override string Type => "ListActions";
+    }
+
+    public class ActionsListedMessage : GameMessage
+    {
+        public override string Type => "ActionsListed";
+        public List<Dictionary<string, object>> Actions { get; set; } = new();
+    }
+
     /// <summary>
     /// Per-phase timings for one step.
     ///

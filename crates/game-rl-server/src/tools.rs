@@ -100,6 +100,16 @@ pub fn list_tools() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "list_actions".into(),
+            description: "List every action the game implements, with real parameter names, types \
+and whether they are required. Derived from the adapter's own reflection, so it cannot \
+disagree with the dispatcher. Call this before acting instead of guessing.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        ToolDef {
             name: "get_state_hash".into(),
             description: "Get hash of current game state for debugging".into(),
             input_schema: serde_json::json!({
@@ -182,6 +192,7 @@ pub async fn handle_tool_call<E: GameEnvironment>(
         "sim_step" => handle_sim_step(params, environment, registry).await,
         "reset" => handle_reset(params, environment).await,
         "get_state_hash" => handle_state_hash(environment).await,
+        "list_actions" => handle_list_actions(environment).await,
         "configure_streams" => handle_configure_streams(params, environment).await,
         _ => Err(GameRLError::ProtocolError(format!(
             "Unknown tool: {}",
@@ -299,6 +310,13 @@ async fn handle_state_hash<E: GameEnvironment>(
     let hash = env.state_hash().await?;
 
     Ok(serde_json::json!({ "hash": hash }))
+}
+
+async fn handle_list_actions<E: GameEnvironment>(
+    environment: &Arc<RwLock<E>>,
+) -> Result<serde_json::Value> {
+    let mut env = environment.write().await;
+    env.list_actions().await
 }
 
 async fn handle_configure_streams<E: GameEnvironment>(
