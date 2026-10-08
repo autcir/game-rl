@@ -858,7 +858,7 @@ mod tests {
                 .unwrap()
                 .completed
                 .as_array()
-                .map_or(false, |a| a.len() == 2)
+                .is_some_and(|a| a.len() == 2)
         );
     }
 
@@ -950,7 +950,7 @@ mod tests {
             serde_json::from_str(with_research).expect("Should parse research with active tech");
         assert_eq!(state.current, Some("automation-2".to_string()));
         assert_eq!(state.progress, 0.45);
-        assert!(state.completed.as_array().map_or(false, |a| a.len() == 1));
+        assert!(state.completed.as_array().is_some_and(|a| a.len() == 1));
 
         // No research, empty queue as object (Lua behavior)
         let no_research = r#"{
@@ -1040,7 +1040,7 @@ mod tests {
         }"#;
         let stats: ProductionStats = serde_json::from_str(with_errors)
             .expect("Should parse production stats with API errors");
-        assert!(stats.api_errors.as_array().map_or(false, |a| a.len() == 1));
+        assert!(stats.api_errors.as_array().is_some_and(|a| a.len() == 1));
     }
 
     #[test]

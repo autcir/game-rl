@@ -6,7 +6,8 @@
 //! Uses PascalCase throughout for LLM-friendly natural language readability.
 
 use game_rl_core::{
-    Action, AgentConfig, AgentId, AgentType, GameEvent, Observation, StepMetrics, StreamDescriptor,
+    Action, AgentConfig, AgentId, AgentType, GameEvent, Observation, ResetCheck, ResetMode,
+    StepMetrics, StreamDescriptor,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -27,6 +28,37 @@ pub struct StepResultPayload {
     /// Per-phase timings, so a slow simulation can be told apart from a slow bridge.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metrics: Option<StepMetrics>,
+}
+
+/// The game tick an adapter reported in an observation, if it reported one.
+///
+/// The tick is not a field on `StepResultPayload`: adapters put it at the top
+/// level of the observation object they return -- `RimWorldStateExtractor`
+/// sets `Tick` from `Find.TickManager.TicksGame`, the Zomboid
+/// `StateExtractor` sets `Tick` from the world age, and the Factorio observer
+/// writes a lowercase `tick`. Both spellings are accepted so a bridge does not
+/// have to know which adapter it is talking to.
+///
+/// `None` means the adapter sent no tick: a vector observation, a per-agent map
+/// of observations, or an object with no tick key. That is "unmeasured", which
+/// is not the same as tick zero, so callers must not silently substitute a
+/// counter for it.
+pub fn observation_tick(observation: &Observation) -> Option<u64> {
+    let tick = match observation {
+        Observation::Structured(fields) => fields.get("Tick").or_else(|| fields.get("tick")),
+        Observation::Custom(value) => value
+            .as_object()
+            .and_then(|fields| fields.get("Tick").or_else(|| fields.get("tick"))),
+        // A vector observation has no field names, so there is nothing to read.
+        Observation::Vector(_) => None,
+    }?;
+
+    // Lua numbers arrive as doubles, so an integral float is still a tick; a
+    // fractional or negative one is not a tick at all.
+    tick.as_u64().or_else(|| match tick.as_f64() {
+        Some(value) if value >= 0.0 && value.fract() == 0.0 => Some(value as u64),
+        _ => None,
+    })
 }
 
 /// Messages sent between Rust bridge and game process
@@ -80,11 +112,25 @@ pub enum GameMessage {
     },
 
     /// Reset complete
+    #[allow(clippy::too_many_arguments)]
     ResetComplete {
         #[serde(rename = "Observation")]
         observation: Observation,
         #[serde(rename = "StateHash")]
         state_hash: Option<String>,
+        /// Which mode the adapter actually ran.
+        #[serde(rename = "Mode", default)]
+        mode: ResetMode,
+        /// The seed the reset was asked to apply.
+        #[serde(rename = "Seed", default)]
+        seed: Option<u64>,
+        /// Whether the seed was applied, not left pending.
+        #[serde(rename = "SeedConsumed", default)]
+        seed_consumed: bool,
+        /// Postconditions the adapter observed. Empty means it reported none, which
+        /// is not a pass -- see `ResetOutcome::verified`.
+        #[serde(rename = "Postconditions", default)]
+        postconditions: Vec<ResetCheck>,
     },
 
     /// State hash response
@@ -148,6 +194,9 @@ pub enum GameMessage {
         seed: Option<u64>,
         #[serde(rename = "Scenario")]
         scenario: Option<String>,
+        /// Absent means `Fast`; see `ResetMode`.
+        #[serde(rename = "Mode", default)]
+        mode: ResetMode,
     },
 
     /// Request state hash
@@ -252,5 +301,92 @@ mod tests {
             GameMessage::GetStateHash => {}
             _ => panic!("Wrong message type"),
         }
+    }
+
+    #[test]
+    fn test_observation_tick_reads_the_rimworld_wire_shape() {
+        // Byte-for-byte the shape `Bridge.SerializeStepResult` emits for
+        // `RimWorldObservation`, whose `Tick` is `TickManager.TicksGame`. If the
+        // adapter ever stops sending it, this fails instead of the bridge
+        // quietly reporting zero.
+        let json = r#"{"Type":"StepResult","AgentId":"colonist-1","Observation":{"Tick":48213,"ColonistCount":3},"Reward":0.0,"RewardComponents":{},"Done":false,"Truncated":false,"StateHash":"ab12"}"#;
+
+        let msg: GameMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            GameMessage::StepResult { result } => {
+                assert_eq!(observation_tick(&result.observation), Some(48213));
+            }
+            _ => panic!("Wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_observation_tick_accepts_every_adapter_spelling() {
+        let structured = |tick: serde_json::Value| {
+            Observation::Structured(
+                [(String::from("tick"), tick)]
+                    .into_iter()
+                    .collect::<HashMap<_, _>>(),
+            )
+        };
+
+        // PascalCase (RimWorld, Zomboid) and lowercase (Factorio observer).
+        assert_eq!(
+            observation_tick(&Observation::Structured(
+                [(String::from("Tick"), serde_json::json!(60))]
+                    .into_iter()
+                    .collect()
+            )),
+            Some(60)
+        );
+        assert_eq!(
+            observation_tick(&structured(serde_json::json!(60))),
+            Some(60)
+        );
+        assert_eq!(
+            observation_tick(&Observation::Custom(serde_json::json!({"Tick": 7}))),
+            Some(7)
+        );
+        // Lua sends doubles; an integral one is still a tick.
+        assert_eq!(
+            observation_tick(&structured(serde_json::json!(43200.0))),
+            Some(43200)
+        );
+    }
+
+    #[test]
+    fn test_observation_tick_is_none_when_unmeasured() {
+        // No tick key: the caller must be able to tell this from tick zero.
+        assert_eq!(
+            observation_tick(&Observation::Structured(HashMap::new())),
+            None
+        );
+        // Wrong shape for a tick: a string, a fraction, a negative number.
+        assert_eq!(
+            observation_tick(&Observation::Structured(
+                [(String::from("Tick"), serde_json::json!("12"))]
+                    .into_iter()
+                    .collect()
+            )),
+            None
+        );
+        assert_eq!(
+            observation_tick(&Observation::Structured(
+                [(String::from("Tick"), serde_json::json!(1.5))]
+                    .into_iter()
+                    .collect()
+            )),
+            None
+        );
+        assert_eq!(
+            observation_tick(&Observation::Structured(
+                [(String::from("Tick"), serde_json::json!(-1))]
+                    .into_iter()
+                    .collect()
+            )),
+            None
+        );
+        // A vector observation carries no field names.
+        assert_eq!(observation_tick(&Observation::Vector(vec![1.0])), None);
     }
 }

@@ -1,6 +1,8 @@
 //! MCP tool handlers for Game-RL protocol
 
-use game_rl_core::{Action, AgentConfig, AgentId, AgentType, GameRLError, Result, error_codes};
+use game_rl_core::{
+    Action, AgentConfig, AgentId, AgentType, GameRLError, ResetMode, Result, error_codes,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::environment::GameEnvironment;
@@ -84,17 +86,35 @@ pub fn list_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "reset".into(),
-            description: "Reset environment for new episode. Returns initial observation.".into(),
+            description: "Reset environment for a new episode. Returns the initial observation \
+                          plus the postconditions the adapter observed, so a caller can verify the \
+                          reset rather than infer it from a success flag."
+                .into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "Seed": {
                         "type": "integer",
-                        "description": "Random seed for reproducibility"
+                        "description": "Random seed. In Mode=Fast the seed governs the RNG after \
+                                        the template load, not which world is loaded; only \
+                                        Mode=Fresh lets the seed select the world."
                     },
                     "Scenario": {
                         "type": "string",
                         "description": "Scenario name to load"
+                    },
+                    "Mode": {
+                        "type": "string",
+                        "enum": ["Fast", "Fresh"],
+                        "description": "Fast loads a known-good template save. Fresh generates a \
+                                        colony from the seed. Defaults to Fast."
+                    },
+                    "TimeoutMs": {
+                        "type": "integer",
+                        "description": "Client-side deadline in milliseconds. A reset that has not \
+                                        converged by then fails with RESET_TIMEOUT instead of \
+                                        holding the environment lock indefinitely. Defaults to \
+                                        30000."
                     }
                 }
             }),
@@ -158,6 +178,9 @@ pub struct SimStepParams {
     pub ticks: u32,
 }
 
+/// Reset deadline when the client does not set one.
+const DEFAULT_RESET_TIMEOUT_MS: u64 = 30_000;
+
 fn default_ticks() -> u32 {
     1
 }
@@ -168,6 +191,13 @@ fn default_ticks() -> u32 {
 pub struct ResetParams {
     pub seed: Option<u64>,
     pub scenario: Option<String>,
+    /// Absent means `Fast`.
+    #[serde(default)]
+    pub mode: ResetMode,
+    /// Client-side deadline. A reset that has not converged by now is a failure,
+    /// not a hang: the environment holds an exclusive lock while it runs.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
 }
 
 /// Parameters for configure_streams
@@ -212,6 +242,7 @@ pub async fn handle_tool_call<E: GameEnvironment>(
                 GameRLError::EpisodeTerminated => error_codes::EPISODE_TERMINATED,
                 GameRLError::SyncTimeout => error_codes::SYNC_TIMEOUT,
                 GameRLError::ResourceExhausted(_) => error_codes::RESOURCE_EXHAUSTED,
+                GameRLError::ResetTimeout { .. } => error_codes::RESET_TIMEOUT,
                 _ => -32603, // Internal error
             };
             Response::error(id, code, e.to_string())
@@ -297,10 +328,21 @@ async fn handle_reset<E: GameEnvironment>(
 ) -> Result<serde_json::Value> {
     let p: ResetParams = serde_json::from_value(params)?;
 
-    let mut env = environment.write().await;
-    let obs = env.reset(p.seed, p.scenario).await?;
+    let deadline = std::time::Duration::from_millis(p.timeout_ms.unwrap_or(DEFAULT_RESET_TIMEOUT_MS));
 
-    Ok(serde_json::to_value(obs)?)
+    // The write lock is held for the whole reset, and stdio handles requests
+    // sequentially, so a reset that never returns wedges every other tool. The
+    // deadline is what keeps a stuck environment from becoming a stuck server.
+    let mut env = environment.write().await;
+    let outcome = tokio::time::timeout(deadline, env.reset(p.seed, p.scenario, p.mode))
+        .await
+        .map_err(|_| {
+            GameRLError::ResetTimeout {
+                timeout_ms: deadline.as_millis() as u64,
+            }
+        })??;
+
+    Ok(serde_json::to_value(outcome)?)
 }
 
 async fn handle_state_hash<E: GameEnvironment>(

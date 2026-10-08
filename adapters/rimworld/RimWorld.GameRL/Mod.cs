@@ -12,6 +12,7 @@ using GameRL.Harmony;
 using GameRL.Harmony.Protocol;
 using RimWorld.GameRL.State;
 using RimWorld.GameRL.Actions;
+using RimWorld.GameRL.Rewards;
 
 namespace RimWorld.GameRL
 {
@@ -44,6 +45,15 @@ namespace RimWorld.GameRL
         private static bool _stepInProgress;
         private static bool _forcingTicks;
 
+        // Which pump is draining the command queue, if any. Two pumps run in the
+        // same frame — the tick postfix fires inside Root_Play.Update, the frame
+        // postfix after it returns — and a command handler can re-enter the pump
+        // (an action handler calls ForceTicks, which ticks, which pumps). Both
+        // cases would run a queued command twice, so a re-entrant pump is
+        // refused and says which pump holds the queue.
+        private static bool _commandPumpActive;
+        private static string? _activeCommandPump;
+
         // Per-step phase timings. A slow simulation and a slow bridge look the
         // same from outside the process and call for opposite responses, so the
         // split is reported rather than just the total.
@@ -56,6 +66,7 @@ namespace RimWorld.GameRL
         private static double _tickMs;
         private static double _executeMs;
         private static double _captureMs;
+        private static string? _stateHashBeforeAction;
 
         // Event push tracking
         private static int _ticksSinceLastEventPush;
@@ -80,7 +91,7 @@ namespace RimWorld.GameRL
 
                 // Initialize components
                 _stateExtractor = new RimWorldStateExtractor();
-                _commandExecutor = new RimWorldCommandExecutor();
+                _commandExecutor = new RimWorldCommandExecutor(_stateExtractor);
 
                 // Start listening for harmony-server connection
                 Environment.SetEnvironmentVariable("GAMERL_ENDPOINT_FILE", EndpointFilePath());
@@ -308,8 +319,24 @@ namespace RimWorld.GameRL
                 _commandExecutor?.ExecuteAction(msg.AgentId, msg.Action!);
                 _executeMs = execWatch.Elapsed.TotalMilliseconds;
 
+                // Did the action actually change anything? Measured by the
+                // environment rather than reported by the action, so this works
+                // for all actions without each one having to describe itself.
+                // Without it an action that is well-formed but has no effect
+                // looks identical to one that worked.
+                _stateHashBeforeAction = _stateExtractor?.ComputeStateHash();
+
                 // Force ticks to advance immediately
                 ForceTicks(_ticksRemaining);
+
+                var hashAfter = _stateExtractor?.ComputeStateHash();
+                var actionResult = _commandExecutor?.LastActionResult;
+                if (actionResult != null && _stateHashBeforeAction != null && hashAfter != null)
+                {
+                    actionResult.Effect = hashAfter != _stateHashBeforeAction
+                        ? "Changed"
+                        : "NoEffect";
+                }
             }
             catch (Exception ex)
             {
@@ -319,14 +346,69 @@ namespace RimWorld.GameRL
             }
         }
 
+        /// <summary>
+        /// Describe why the game cannot be driven right now, naming the state that
+        /// actually blocks it.
+        /// </summary>
+        /// <remarks>
+        /// Every probe here is itself guarded: the whole point is that probing game
+        /// state is what threw in the first place, so a diagnostic that can throw is
+        /// not a diagnostic. Anything unreachable is reported as "unavailable" rather
+        /// than being allowed to take the process down.
+        /// </remarks>
+        private static string DescribeGameState(Exception? cause)
+        {
+            string probe(Func<string> read, string label)
+            {
+                try
+                {
+                    return $"{label}={read()}";
+                }
+                catch (Exception ex)
+                {
+                    return $"{label}=<{ex.GetType().Name}>";
+                }
+            }
+
+            var parts = new List<string>
+            {
+                probe(() => Current.ProgramState.ToString(), "ProgramState"),
+                probe(() => Find.CurrentMap?.ToString() ?? "null", "CurrentMap"),
+                probe(() => LongEventHandler.ShouldWaitForEvent.ToString(), "LongEventBusy"),
+                probe(() => Find.TickManager?.TicksGame.ToString() ?? "null", "TickManager"),
+            };
+            if (cause != null)
+            {
+                parts.Add($"probe threw {cause.GetType().Name}: {cause.Message}");
+            }
+            return string.Join(", ", parts);
+        }
+
         private static void ForceTicks(uint count)
         {
             if (_forcingTicks) return;  // Prevent recursion
 
-            var tickManager = Find.TickManager;
+            // `Verse.Find.TickManager` dereferences the current map *internally* and
+            // throws NullReferenceException when there is no map -- main menu, or a
+            // save still loading. So the null check below cannot be reached: the
+            // property access itself is what blows up. Reading it defensively is the
+            // difference between a diagnosable refusal and a NullReferenceException
+            // that names nothing.
+            TickManager? tickManager;
+            try
+            {
+                tickManager = Find.TickManager;
+            }
+            catch (Exception ex)
+            {
+                Log.Warning($"[GameRL] Cannot force {count} ticks: {DescribeGameState(ex)}");
+                CompleteStep();
+                return;
+            }
+
             if (tickManager == null)
             {
-                Log.Warning("[GameRL] No TickManager, cannot force ticks");
+                Log.Warning($"[GameRL] Cannot force {count} ticks: {DescribeGameState(null)}");
                 CompleteStep();
                 return;
             }
@@ -369,7 +451,12 @@ namespace RimWorld.GameRL
 
             try
             {
-                _commandExecutor?.Reset(msg.Seed, msg.Scenario);
+                // Throws on an unknown mode rather than defaulting: a reset
+                // quietly downgraded to "load the template again" is the failure
+                // this whole path exists to make impossible.
+                var mode = ResetModes.Parse(msg.Mode);
+
+                var outcome = _commandExecutor!.Reset(msg.Seed, msg.Scenario, mode);
 
                 // Track episode start for observations
                 _stateExtractor!.EpisodeStartTick = Find.TickManager?.TicksGame ?? 0;
@@ -395,8 +482,33 @@ namespace RimWorld.GameRL
                     }
                     observation = observations;
                 }
-                var stateHash = _stateExtractor!.ComputeStateHash();
-                _bridge?.SendResetComplete(observation, stateHash);
+                var stateHash = _stateExtractor.ComputeStateHash();
+
+                var postconditions = BuildResetPostconditions(outcome, observation, stateHash);
+                foreach (var postcondition in postconditions)
+                {
+                    // Reported as an error, not as a ResetComplete with Ok:false.
+                    // A reset whose postconditions failed has not happened, and
+                    // sending the success type would say it did.
+                    if (!postcondition.Ok)
+                    {
+                        Log.Error(
+                            $"[GameRL] Reset postcondition '{postcondition.Name}' failed: " +
+                            postcondition.Observed);
+                        _bridge?.SendError(-32603,
+                            $"reset postcondition '{postcondition.Name}' failed: observed " +
+                            postcondition.Observed);
+                        return;
+                    }
+                }
+
+                _bridge?.SendResetComplete(
+                    observation,
+                    stateHash,
+                    ResetModes.ToWireString(outcome.RequestedMode),
+                    outcome.Seed,
+                    outcome.SeedConsumed,
+                    postconditions);
             }
             catch (Exception ex)
             {
@@ -405,9 +517,120 @@ namespace RimWorld.GameRL
             }
         }
 
+        /// <summary>
+        /// The five reset checks, in the order the wire contract fixes them.
+        ///
+        /// This list is the contract: nothing may be added, removed or renamed.
+        /// Every Ok is derived from a value read back out of the game — the map
+        /// and the roster from after the reset, the observation from what the
+        /// extractor actually returned, the digest from whether one exists. A
+        /// check that reports what it intended to do is worse than no check.
+        /// </summary>
+        private static List<ResetPostcondition> BuildResetPostconditions(
+            ResetOutcome outcome,
+            object observation,
+            string? stateHash)
+        {
+            bool observationOk = ObservationExtracted(observation, out var observationObserved);
+
+            return new List<ResetPostcondition>
+            {
+                new ResetPostcondition
+                {
+                    Name = "map",
+                    Ok = outcome.HasMap,
+                    Observed = outcome.MapObserved
+                },
+                new ResetPostcondition
+                {
+                    Name = "colonists",
+                    Ok = outcome.ColonistCount > 0,
+                    Observed = $"colonists {outcome.ColonistCount}"
+                },
+                new ResetPostcondition
+                {
+                    Name = "seed_consumed",
+                    Ok = outcome.SeedConsumed,
+                    Observed = outcome.SeedObserved
+                },
+                new ResetPostcondition
+                {
+                    Name = "observation",
+                    Ok = observationOk,
+                    Observed = observationObserved
+                },
+                new ResetPostcondition
+                {
+                    Name = "state_hash",
+                    Ok = stateHash != null,
+                    Observed = stateHash ?? "no digest produced"
+                }
+            };
+        }
+
+        /// <summary>
+        /// Read back what the extractor returned, rather than assuming it worked.
+        ///
+        /// ExtractForAgent ends in a cast to RimWorldObservation followed by a
+        /// null-forgiving operator, so "nothing was extracted" is a reachable
+        /// state and not a type error.
+        /// </summary>
+        private static bool ObservationExtracted(object? observation, out string observed)
+        {
+            if (observation == null)
+            {
+                observed = "no observation returned";
+                return false;
+            }
+
+            if (observation is Dictionary<string, object> perAgent)
+            {
+                var described = new List<string>();
+                var allExtracted = true;
+                foreach (var entry in perAgent)
+                {
+                    if (ObservationExtracted(entry.Value, out var oneObserved))
+                    {
+                        described.Add($"{entry.Key}={oneObserved}");
+                    }
+                    else
+                    {
+                        described.Add($"{entry.Key}={oneObserved}");
+                        allExtracted = false;
+                    }
+                }
+                observed = string.Join(", ", described);
+                return allExtracted;
+            }
+
+            if (observation is DeltaObservation delta)
+            {
+                if (!string.IsNullOrEmpty(delta.StateHash))
+                {
+                    observed = $"DeltaObservation(hash={delta.StateHash})";
+                    return true;
+                }
+
+                observed = "DeltaObservation without a state hash";
+                return false;
+            }
+
+            if (observation is RimWorldObservation full)
+            {
+                observed = $"RimWorldObservation(colonists={full.ColonistCount}, tick={full.Tick})";
+                return true;
+            }
+
+            observed = $"{observation.GetType().Name}, which is not an observation";
+            return false;
+        }
+
         private static void HandleGetStateHash(GetStateHashMessage msg)
         {
-            var hash = _stateExtractor?.ComputeStateHash() ?? "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+            // "none" rather than a zero digest with a "sha256:" prefix: a
+            // fabricated hash is a state that never existed, and the Rust side
+            // types this field as a plain String, so it cannot be null.
+            var hash = _stateExtractor?.ComputeStateHash() ?? "none";
             _bridge?.SendStateHash(hash);
         }
 
@@ -454,8 +677,7 @@ namespace RimWorld.GameRL
         /// </summary>
         internal static void OnTick()
         {
-            // Process any pending commands from server
-            _bridge?.ProcessCommands();
+            PumpCommands("tick");
 
             // If we're in a step, decrement counter
             if (_stepInProgress && _ticksRemaining > 0)
@@ -476,6 +698,104 @@ namespace RimWorld.GameRL
                 {
                     PushPendingEvents();
                     _ticksSinceLastEventPush = 0;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Called once per frame by FramePumpPatch.
+        ///
+        /// Exists because the tick pump cannot run before a game is ticking: at
+        /// the main menu there is no TickManager, so <c>reset</c> and
+        /// <c>get_state_hash</c> sat in the queue until a game was loaded. A
+        /// reset that is reachable is also one that can fail honestly at the main
+        /// menu, which is where a wrong configuration is cheapest to find.
+        /// </summary>
+        /// <param name="pump">Which postfix is calling, logged with every command.</param>
+        internal static void OnFrame(string pump)
+        {
+            PumpCommands(pump);
+        }
+
+        /// <summary>
+        /// Drain the command queue, once, from whichever pump got here first.
+        ///
+        /// The name travels into ProcessCommands so the log says which path
+        /// handled a command. Without it, "reset worked" and "reset worked
+        /// because the game happened to be ticking" look identical from outside
+        /// the process, and the second is the interesting one.
+        /// </summary>
+        /// <summary>
+        /// A pump collision in progress, and how long it has been running.
+        /// A collision spans frames, so it is warned about once and totalled at
+        /// the end rather than logged per frame.
+        /// </summary>
+        private static bool _pumpCollisionActive;
+        private static int _pumpCollisionCount;
+
+        private static void PumpCommands(string pump)
+        {
+            var bridge = _bridge;
+            if (bridge == null) return;
+
+            if (_commandPumpActive)
+            {
+                // Silent when it is the same pump re-entering: that is the
+                // bounded, expected case — an action handler calls ForceTicks,
+                // which ticks, which pumps once per forced tick. Those commands
+                // are picked up by the outer drain on its next iteration, so
+                // nothing is lost, but logging it would put one line per forced
+                // tick into the log of every step.
+                //
+                // The two-pumps-collide case is warned about, because that is
+                // where the frame makes it look like a tick and nobody can tell
+                // which one ran. But a collision is not an event, it is a
+                // *duration*: a reset drains from frame:root_play while the game
+                // ticks, so the tick pump collides on every single tick for the
+                // whole reset. One warning per tick meant 15 identical lines per
+                // reset here, which is how a log teaches you to skip it.
+                //
+                // So: one line when the collision starts, one when it ends with
+                // the count in between. The onset is what you read live; the
+                // total is what tells you it was structural rather than a blip.
+                if (!string.Equals(pump, _activeCommandPump, StringComparison.Ordinal))
+                {
+                    if (!_pumpCollisionActive)
+                    {
+                        _pumpCollisionActive = true;
+                        _pumpCollisionCount = 0;
+                        Log.Warning(
+                            $"[GameRL] Command pump collision: '{pump}' is being skipped " +
+                            $"while '{_activeCommandPump ?? "unknown"}' drains the queue in the " +
+                            "same frame. A second pass would run a queued command twice. " +
+                            "Warning once per collision; the total is reported when it ends.");
+                    }
+
+                    _pumpCollisionCount++;
+                }
+
+                return;
+            }
+
+            _commandPumpActive = true;
+            _activeCommandPump = pump;
+            try
+            {
+                bridge.ProcessCommands(pump);
+            }
+            finally
+            {
+                _activeCommandPump = null;
+                _commandPumpActive = false;
+
+                if (_pumpCollisionActive)
+                {
+                    Log.Message(
+                        $"[GameRL] Command pump collision ended: " +
+                        $"{_pumpCollisionCount} frame(s) skipped. No command was lost; the " +
+                        "outer drain picks up anything the inner one did not reach.");
+                    _pumpCollisionActive = false;
+                    _pumpCollisionCount = 0;
                 }
             }
         }
@@ -527,17 +847,24 @@ namespace RimWorld.GameRL
                 var stateHash = _stateExtractor!.ComputeStateHash();
                 var hashMs = hashWatch.Elapsed.TotalMilliseconds;
 
+                // Once per step, for the colony. The reward is a property of the
+                // colony and the manifest declares one agent, so there is one
+                // measurement however many agents are registered — and it has to
+                // be once, because the reward function keeps a delta baseline
+                // that the first call advances.
+                var rewardWatch = Stopwatch.StartNew();
+                var reward = _commandExecutor.ComputeRewardFrame();
+                var rewardMs = rewardWatch.Elapsed.TotalMilliseconds;
+
                 if (_agents.Count <= 1)
                 {
                     var observation = ExtractTimed(_currentAgentId ?? "default", out var extractMs);
-                    var rewardComponents = ComputeRewardTimed(_currentAgentId ?? "default", out var rewardMs);
-                    var totalReward = _commandExecutor.GetTotalReward(_currentAgentId ?? "default");
 
                     _bridge?.SendStepResult(
                         _currentAgentId ?? "default",
                         observation,
-                        totalReward,
-                        rewardComponents,
+                        reward.Total,
+                        reward.CopyComponents(),
                         done,
                         truncated,
                         stateHash,
@@ -549,20 +876,15 @@ namespace RimWorld.GameRL
                 foreach (var agentId in _agents.Keys)
                 {
                     var observation = ExtractTimed(agentId, out var extractMs);
-                    var rewardComponents = ComputeRewardTimed(agentId, out var rewardMs);
-                    var totalReward = _commandExecutor.GetTotalReward(agentId);
 
-                    results.Add(new StepResultMessage
-                    {
-                        AgentId = agentId,
-                        Observation = observation,
-                        Reward = totalReward,
-                        RewardComponents = rewardComponents,
-                        Done = done,
-                        Truncated = truncated,
-                        StateHash = stateHash,
-                        Metrics = BuildMetrics(extractMs + hashMs, rewardMs)
-                    });
+                    results.Add(BuildStepResult(
+                        agentId,
+                        observation,
+                        reward,
+                        done,
+                        truncated,
+                        stateHash,
+                        BuildMetrics(extractMs + hashMs, rewardMs)));
                 }
 
                 _bridge?.SendBatchStepResult(results);
@@ -574,20 +896,48 @@ namespace RimWorld.GameRL
             }
         }
 
+        /// <summary>
+        /// One agent's step message, with the reward taken from a single frame.
+        ///
+        /// Both reward fields are written from one argument, so they cannot be
+        /// filled from two different computations. This is the invariant the
+        /// harness checks every step (Reward == sum(RewardComponents)); it is
+        /// meant to be impossible to break here rather than checked after the
+        /// fact.
+        ///
+        /// The single-agent path sends through Bridge.SendStepResult, which
+        /// takes the two reward numbers as arguments rather than a message, and
+        /// Bridge's Send is private so this cannot be used for it. That path
+        /// reads the same frame local, one line apart.
+        /// </summary>
+        private static StepResultMessage BuildStepResult(
+            string agentId,
+            object observation,
+            RewardFrame reward,
+            bool done,
+            bool truncated,
+            string? stateHash,
+            StepMetricsMessage? metrics)
+        {
+            return new StepResultMessage
+            {
+                AgentId = agentId,
+                Observation = observation,
+                Reward = reward.Total,
+                RewardComponents = reward.CopyComponents(),
+                Done = done,
+                Truncated = truncated,
+                StateHash = stateHash,
+                Metrics = metrics
+            };
+        }
+
         private static object ExtractTimed(string agentId, out double extractMs)
         {
             var watch = Stopwatch.StartNew();
             var obs = ExtractObservationForAgent(agentId);
             extractMs = watch.Elapsed.TotalMilliseconds;
             return obs;
-        }
-
-        private static Dictionary<string, double> ComputeRewardTimed(string agentId, out double rewardMs)
-        {
-            var watch = Stopwatch.StartNew();
-            var components = _commandExecutor!.ComputeReward(agentId);
-            rewardMs = watch.Elapsed.TotalMilliseconds;
-            return components;
         }
 
         private static StepMetricsMessage? BuildMetrics(double extractMs, double rewardMs)

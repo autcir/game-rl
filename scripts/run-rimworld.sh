@@ -51,10 +51,17 @@ export GAMERL_ENDPOINT_FILE="Z:/tmp/gamerl-logs/${INSTANCE_ID}/endpoint"
 export GAMERL_LOG_DIR="Z:/tmp/gamerl-logs/${INSTANCE_ID}"
 
 EXE=""
+# Probe both layouts. A Wine install normally keeps the game *inside* the prefix
+# (WINEPREFIX/drive_c/Games/...), and WINEPREFIX above points into
+# $GAME_ROOT/prefix -- so probing only $GAME_ROOT/drive_c/... can never find it.
+# The prefix is the authoritative location, so it is probed too and its paths are
+# tried last, letting an explicit GAME_ROOT override still win.
 for candidate in \
     "$GAME_ROOT/drive_c/Games/RimWorld/RimWorldLinux" \
     "$GAME_ROOT/RimWorldLinux" \
-    "$GAME_ROOT/drive_c/Games/RimWorld/RimWorldWin64.exe"
+    "$GAME_ROOT/drive_c/Games/RimWorld/RimWorldWin64.exe" \
+    "${WINEPREFIX}/drive_c/Games/RimWorld/RimWorldLinux" \
+    "${WINEPREFIX}/drive_c/Games/RimWorld/RimWorldWin64.exe"
 do
     if [[ -f "$GAME_ROOT/$candidate" || -f "$candidate" ]]; then
         EXE="$candidate"
@@ -63,8 +70,11 @@ do
 done
 
 if [[ -z "$EXE" ]]; then
-    echo "error: no RimWorld executable under $GAME_ROOT" >&2
-    echo "set GAME_ROOT to override" >&2
+    echo "error: no RimWorld executable found" >&2
+    echo "  GAME_ROOT   = $GAME_ROOT" >&2
+    echo "  WINEPREFIX  = $WINEPREFIX" >&2
+    echo "  searched    = \$GAME_ROOT{,/prefix}/drive_c/Games/RimWorld/{RimWorldLinux,RimWorldWin64.exe}" >&2
+    echo "set GAME_ROOT or WINEPREFIX to override" >&2
     exit 1
 fi
 

@@ -202,7 +202,7 @@ async fn main() -> Result<()> {
         }
 
         // Sort by most recent first
-        candidates.sort_by(|a, b| b.modified.cmp(&a.modified));
+        candidates.sort_by_key(|a| std::cmp::Reverse(a.modified));
 
         // Try to connect to each candidate in order of freshness
         for candidate in &candidates {

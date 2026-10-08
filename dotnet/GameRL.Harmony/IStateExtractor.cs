@@ -26,8 +26,14 @@ namespace GameRL.Harmony
         /// <summary>
         /// Compute state hash for determinism verification
         /// </summary>
-        /// <returns>Hash string in format "sha256:..."</returns>
-        string ComputeStateHash();
+        /// <remarks>
+        /// Describes the world, not when it was sampled, and returns null when
+        /// no digest could be computed. There is deliberately no sentinel
+        /// string for failure: a failed extraction that looks like a digest by
+        /// prefix is a failed extraction that reads as a valid state.
+        /// </remarks>
+        /// <returns>A "sha256:..." digest, or null when none could be produced</returns>
+        string? ComputeStateHash();
 
         /// <summary>
         /// Collect events that occurred since last collection

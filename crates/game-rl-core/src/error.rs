@@ -49,6 +49,12 @@ pub enum GameRLError {
     GameError(String),
 
     /// Protocol error
+    #[error("Reset did not converge within {timeout_ms} ms; the environment may be mid-load. The environment lock was released and no episode was started.")]
+    ResetTimeout {
+        /// The deadline that elapsed, in milliseconds.
+        timeout_ms: u64,
+    },
+
     #[error("Protocol error: {0}")]
     ProtocolError(String),
 }
@@ -66,4 +72,6 @@ pub mod error_codes {
     pub const EPISODE_TERMINATED: i32 = -32002;
     pub const SYNC_TIMEOUT: i32 = -32003;
     pub const RESOURCE_EXHAUSTED: i32 = -32004;
+    /// Reset exceeded its deadline.
+    pub const RESET_TIMEOUT: i32 = -32005;
 }

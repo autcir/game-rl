@@ -33,6 +33,27 @@ namespace RimWorld.GameRL.Patches
             Log.Message($"[GameRL] Consumed RNG seed: {seed}");
             return seed;
         }
+
+        /// <summary>
+        /// Apply a seed to the game's single global RNG stream, and consume it.
+        ///
+        /// Goes through PendingSeed on purpose. While a seed is pending the
+        /// Rand.Seed setter prefix overwrites whatever it is given, so consuming
+        /// here is what makes the assignment below reach Rand unchanged instead
+        /// of being replaced. PendingSeed is null again on return: a seed that
+        /// stays pending has not been applied, it has only been queued.
+        ///
+        /// An int is the widest seed the API accepts, so the high 32 bits of a
+        /// 64-bit wire seed cannot be honoured and are dropped.
+        /// </summary>
+        /// <returns>The value actually written to Rand.Seed</returns>
+        public static int ApplySeed(ulong seed)
+        {
+            PendingSeed = seed;
+            var value = ConsumeSeed();
+            Rand.Seed = value;
+            return value;
+        }
     }
 
     /// <summary>

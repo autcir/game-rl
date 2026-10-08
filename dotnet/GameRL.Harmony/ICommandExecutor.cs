@@ -32,11 +32,16 @@ namespace GameRL.Harmony
         void ExecuteAction(string agentId, object action);
 
         /// <summary>
-        /// Reset the game state
+        /// Reset the game state for a new episode.
+        ///
+        /// Returns only once the new world is observably in place, and throws
+        /// otherwise: a reset that queues work and returns has not reset
+        /// anything, and the caller cannot tell the difference.
         /// </summary>
         /// <param name="seed">Optional RNG seed for determinism</param>
         /// <param name="scenario">Optional scenario name to load</param>
-        void Reset(ulong? seed, string? scenario);
+        /// <param name="mode">Whether to load a template or generate from the seed</param>
+        ResetOutcome Reset(ulong? seed, string? scenario, ResetMode mode);
 
         /// <summary>
         /// Check if episode has terminated

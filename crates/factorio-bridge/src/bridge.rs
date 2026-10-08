@@ -7,7 +7,8 @@ use crate::rcon::RconClient;
 use async_trait::async_trait;
 use game_rl_core::{
     Action, AgentConfig, AgentId, AgentManifest, AgentType, Capabilities, GameManifest,
-    GameRLError, Observation, Result, StepResult, StreamDescriptor, manifest::Scenario,
+    GameRLError, ResetMode, ResetOutcome, Result, StepResult, StreamDescriptor,
+    manifest::Scenario,
 };
 use game_rl_server::GameEnvironment;
 use game_rl_server::environment::StateUpdate;
@@ -17,6 +18,43 @@ use std::path::PathBuf;
 use tokio::sync::broadcast;
 use tokio::time::Duration;
 use tracing::{debug, info};
+
+/// Longest scenario name [`scenario_lua_literal`] will accept.
+const MAX_SCENARIO_LEN: usize = 64;
+
+/// Quote a scenario name as a Lua string literal, or refuse it.
+///
+/// `scenario` reaches Factorio as Lua *source*: it is interpolated into
+/// `remote.call("gamerl", "reset", seed, scenario)`, which Factorio executes.
+/// A value containing `"` therefore closes the literal and everything after it
+/// is parsed as Lua, so a caller that supplied `foo"; os.execute("id")` would
+/// run that on the game server. Scenario names have no use for a character
+/// outside the set below, so anything else is rejected instead of escaped: an
+/// allowlist cannot be escaped around, whereas an escape scheme has to agree
+/// with the interpreter's dialect (Lua 5.1 and 5.2 have no `\uXXXX`, which is
+/// what JSON encoding emits for a control character).
+///
+/// Both scenario names in this bridge's own manifest -- `freeplay` and
+/// `sandbox` -- are accepted.
+fn scenario_lua_literal(scenario: &str) -> Result<String> {
+    let accepted = !scenario.is_empty()
+        && scenario.len() <= MAX_SCENARIO_LEN
+        && scenario
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+
+    if !accepted {
+        return Err(GameRLError::GameError(format!(
+            "Refusing scenario {scenario:?}: it is interpolated into Lua source, so only 1 to \
+             {MAX_SCENARIO_LEN} characters drawn from [A-Za-z0-9_-] are accepted (for example \
+             \"freeplay\" or \"sandbox\"). Nothing was sent to Factorio and no episode was reset."
+        )));
+    }
+
+    // Quoteable without escaping: every accepted character is a plain literal
+    // character inside a double-quoted Lua string.
+    Ok(format!("\"{scenario}\""))
+}
 
 /// Generate the Factorio action schema for a specific agent type
 fn factorio_action_schema(agent_type: &AgentType) -> serde_json::Value {
@@ -438,9 +476,22 @@ impl GameEnvironment for FactorioBridge {
         })
     }
 
-    async fn reset(&mut self, seed: Option<u64>, scenario: Option<String>) -> Result<Observation> {
+    async fn reset(
+        &mut self,
+        seed: Option<u64>,
+        scenario: Option<String>,
+        mode: ResetMode,
+    ) -> Result<ResetOutcome> {
+        if mode == ResetMode::Fresh {
+            return Err(GameRLError::GameError(
+                "ResetMode::Fresh is not implemented for Factorio: the Lua `reset` call takes a \
+                 scenario name, not a seed that selects a world. Refusing rather than silently \
+                 running Fast, which would hand back a different world than the caller asked for."
+                    .into(),
+            ));
+        }
         info!(
-            "Resetting environment (seed: {:?}, scenario: {:?})",
+            "Resetting environment (seed: {:?}, scenario: {:?}, mode: Fast)",
             seed, scenario
         );
 
@@ -448,12 +499,17 @@ impl GameEnvironment for FactorioBridge {
         self.observer.clear().await?;
 
         // Call reset via RCON
+        // `seed` is an `Option<u64>`, so `to_string` yields digits only: it
+        // cannot close the literal or contribute Lua syntax.
         let seed_arg = seed
             .map(|s| s.to_string())
             .unwrap_or_else(|| "nil".to_string());
-        let scenario_arg = scenario
-            .map(|s| format!("\"{}\"", s))
-            .unwrap_or_else(|| "nil".to_string());
+        // `scenario` is attacker-reachable (an MCP tool argument) and is
+        // interpolated as Lua source, so it is validated rather than trusted.
+        let scenario_arg = match &scenario {
+            Some(scenario) => scenario_lua_literal(scenario)?,
+            None => "nil".to_string(),
+        };
 
         let lua = format!(
             r#"remote.call("gamerl", "reset", {}, {})"#,
@@ -466,7 +522,17 @@ impl GameEnvironment for FactorioBridge {
 
         // Convert to generic observation (use first registered agent or empty)
         let agent_id = self.agents.keys().next().cloned().unwrap_or_default();
-        Ok(ObservationReader::to_observation(&obs, &agent_id))
+        Ok(ResetOutcome {
+            observation: ObservationReader::to_observation(&obs, &agent_id),
+            state_hash: obs.state_hash.clone(),
+            mode: ResetMode::Fast,
+            seed,
+            // The Factorio adapter does not report reset postconditions, so this
+            // stays false and `postconditions` stays empty: `verified()` is None,
+            // which reads as unproven rather than as a pass.
+            seed_consumed: false,
+            postconditions: Vec::new(),
+        })
     }
 
     async fn state_hash(&mut self) -> Result<String> {
@@ -622,5 +688,56 @@ mod tests {
         // headless is false for GUI playtesting mode
         assert!(!manifest.capabilities.headless);
         assert_eq!(manifest.capabilities.max_agents, 8);
+    }
+
+    #[test]
+    fn test_scenario_lua_injection_is_rejected() {
+        // Each of these closes the Lua string literal or adds Lua syntax, so
+        // the rest of the value would be executed by Factorio. None of them may
+        // reach the point where a literal is produced.
+        let attacks = [
+            r#"foo"; os.execute("id")"#,
+            r#"" .. os.execute("id") .. ""#,
+            "freeplay\"); os.execute(\"id\")",
+            "freeplay\nos.execute(\"id\")",
+            "../../etc/passwd",
+            "free play",
+            "",
+            &"a".repeat(MAX_SCENARIO_LEN + 1),
+        ];
+
+        for attack in attacks {
+            let err = scenario_lua_literal(attack)
+                .expect_err("a scenario outside the allowlist must not become Lua source")
+                .to_string();
+            // A caller reading only this learns what was refused and why.
+            assert!(err.contains("Refusing scenario"), "{err}");
+            assert!(err.contains("[A-Za-z0-9_-]"), "{err}");
+            assert!(err.contains("no episode was reset"), "{err}");
+        }
+    }
+
+    #[test]
+    fn test_manifest_scenarios_are_accepted_verbatim() {
+        // The two names the manifest advertises have to keep working, and the
+        // literal has to need no escaping: exactly one pair of quotes.
+        for name in ["freeplay", "sandbox", "my_scenario-2"] {
+            let literal = scenario_lua_literal(name).expect("allowlisted name");
+            assert_eq!(literal, format!("\"{name}\""));
+            assert_eq!(literal.matches('"').count(), 2, "{literal}");
+        }
+    }
+
+    #[test]
+    fn test_seed_interpolation_is_digits_only() {
+        // The other argument on this Lua line. u64 formatting cannot produce a
+        // quote or a backslash, which is why only `scenario` needs checking.
+        for seed in [0u64, 1, u64::MAX] {
+            let rendered = seed.to_string();
+            assert!(
+                rendered.chars().all(|c| c.is_ascii_digit()),
+                "{rendered} is not digits only"
+            );
+        }
     }
 }

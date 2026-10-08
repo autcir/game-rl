@@ -6,6 +6,7 @@
 #[cfg(test)]
 mod tests {
     use crate::protocol::GameMessage;
+    use game_rl_core::ResetMode;
     use mlua::{Lua, Result as LuaResult};
 
     /// Load our JSON.lua into a Lua state and register it for require()
@@ -367,6 +368,7 @@ mod tests {
         let msg = GameMessage::Reset {
             seed: Some(42),
             scenario: Some("tutorial".into()),
+            mode: ResetMode::Fast,
         };
         let json = serde_json::to_string(&msg).unwrap();
 
@@ -437,7 +439,7 @@ mod tests {
         assert_eq!(result.get::<String>("Type")?, "StepResult");
         assert_eq!(result.get::<String>("AgentId")?, "roundtrip-agent");
         assert_eq!(result.get::<f64>("Reward")?, 42.5);
-        assert_eq!(result.get::<bool>("Done")?, true);
+        assert!(result.get::<bool>("Done")?);
 
         Ok(())
     }

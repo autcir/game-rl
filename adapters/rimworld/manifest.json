@@ -3,11 +3,11 @@
   "version": "1.6",
   "game_rl_version": "0.5.0",
   "capabilities": {
-    "multi_agent": true,
-    "max_agents": 8,
+    "multi_agent": false,
+    "max_agents": 1,
     "deterministic": false,
     "headless": false,
-    "save_replay": true,
+    "save_replay": false,
     "delta_observations": true
   },
   "agent_config": {
@@ -631,10 +631,31 @@
   ],
   "tick_rate": 60,
   "max_episode_ticks": 900000,
+  "reset": {
+    "modes": {
+      "Fast": "Load the save named by GAMERL_RESET_TEMPLATE, then apply the seed to Rand. Reproducible, and it fails loudly if the template is missing. The loaded world does not depend on the seed: reset(A) and reset(B) load the same colony.",
+      "Fresh": "Generate a world, a map and a colonist roster from the seed, so reset(A) and reset(B) differ. IMPLEMENTED BUT NOT RUNTIME-VERIFIED, and refused by default. It runs Verse.Game.InitNewGame on the assumption that it completes on the calling thread, and that assumption cannot be checked offline: every method body in the reference assembly this mod compiles against (Krafs.Rimworld.Ref 1.6.4633) is stripped at RVA 0, Verse.QuickTest does not exist in 1.6.4633, and RimWorld.Autotests_ColonyMaker.MakeColony needs a Playing game that already owns a Settlement, which is the thing generation has to produce. So Mode=\"Fresh\" answers with an Error naming every precondition it checked and the value it observed, unless GAMERL_FRESH_RESET=1 opts in. With the opt-in it generates and then observes the world name, WorldInfo.Seed, map size, colonist count and storyteller, and throws with the observed value if any step does not produce them. It never falls back to Mode=\"Fast\", and it requires a seed: generating a colony while ignoring the seed would be Fast wearing Fresh's name."
+    },
+    "template_env": "GAMERL_RESET_TEMPLATE",
+    "template_kind": "save name only, as listed in RimWorld's Saves folder, without the .rws extension; no path, no fallback",
+    "fresh_opt_in_env": "GAMERL_FRESH_RESET",
+    "fresh_opt_in_kind": "\"1\" or \"true\"; anything else, including unset, has not opted in. Without it Mode=\"Fresh\" refuses and no generation is attempted",
+    "fresh_scenario_env": "GAMERL_FRESH_SCENARIO",
+    "fresh_scenario_kind": "ScenarioDef name, default \"Crashland\"; the wire's scenario field wins over this",
+    "postconditions": [
+      "map",
+      "colonists",
+      "seed_consumed",
+      "observation",
+      "state_hash"
+    ],
+    "notes": "A reset blocks until its five postconditions are observably true, and reports an Error naming the failing check and the value observed instead. Postconditions are a fixed ordered list, identical for both modes; nothing may be added, removed or renamed. Mode absent means Fast. There is no reset timeout on the Rust side, so a reset that does not return stalls the whole MCP server. ipc.requires_env still lists GAMERL_RESET_TEMPLATE, which is right for Fast and for the default mode but wrong for a Fresh-only deployment: Mode=\"Fresh\" never reads it, and a Fresh-only run does not need it set. The seed is written to Rand.Seed as a non-negative int, so the high 32 bits of a 64-bit seed cannot be honoured, and Rand.Seed has no public getter, so seed_consumed reports the value written rather than one read back. Commands are drained from a tick pump and a frame pump (Verse.Root_Entry.Update and Verse.Root_Play.Update, since Verse.Root.Update is virtual and both concrete roots override it), the two are mutually exclusive, and every handled command is logged with the pump that handled it, because at the main menu there is no TickManager and the tick pump never runs."
+  },
   "ipc": {
     "requires_env": [
       "GAMERL_INSTANCE_ID",
-      "GAMERL_TCP"
+      "GAMERL_TCP",
+      "GAMERL_RESET_TEMPLATE"
     ],
     "transports": {
       "tcp": {

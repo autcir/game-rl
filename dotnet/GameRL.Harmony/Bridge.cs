@@ -494,7 +494,13 @@ namespace GameRL.Harmony
             return new ResetMessage
             {
                 Seed = obj["Seed"]?.ToObject<ulong?>(),
-                Scenario = obj["Scenario"]?.ToString()
+                Scenario = obj["Scenario"]?.ToString(),
+                // Left as sent, including absent: the adapter owns the mapping
+                // from wire name to mode, so one side decides what an unknown
+                // value means.
+                Mode = obj["Mode"]?.Type == JTokenType.Null
+                    ? null
+                    : obj["Mode"]?.ToString()
             };
         }
 
@@ -510,12 +516,21 @@ namespace GameRL.Harmony
         /// <summary>
         /// Process pending commands from the server. Call from main game thread.
         /// </summary>
-        public void ProcessCommands()
+        /// <param name="pump">
+        /// Which loop is draining the queue, e.g. "tick" or "frame:root_entry".
+        /// Logged with every command, because a game that only drains commands
+        /// while ticking is a game where a command sent at the main menu queues
+        /// indefinitely and looks like a hung bridge.
+        /// </param>
+        public void ProcessCommands(string? pump = null)
         {
             while (_incomingQueue.TryDequeue(out var message))
             {
                 try
                 {
+                    if (pump != null)
+                        Log($"{message.GetType().Name} handled by the {pump} pump");
+
                     switch (message)
                     {
                         case RegisterAgentMessage m:
@@ -615,14 +630,30 @@ namespace GameRL.Harmony
         }
 
         /// <summary>
-        /// Send reset complete with initial observation
+        /// Send reset complete with initial observation and the checks that
+        /// make the observation trustworthy.
         /// </summary>
-        public void SendResetComplete(object observation, string? stateHash = null)
+        /// <remarks>
+        /// One shape only. A partial ResetComplete is how "the reset was sent"
+        /// gets read as "a new world is in place", so there is no overload
+        /// that can omit the evidence.
+        /// </remarks>
+        public void SendResetComplete(
+            object observation,
+            string? stateHash,
+            string mode,
+            ulong? seed,
+            bool seedConsumed,
+            List<ResetPostcondition> postconditions)
         {
             Send(new ResetCompleteMessage
             {
                 Observation = observation,
-                StateHash = stateHash
+                StateHash = stateHash,
+                Mode = mode,
+                Seed = seed,
+                SeedConsumed = seedConsumed,
+                Postconditions = postconditions ?? new List<ResetPostcondition>()
             });
         }
 
@@ -750,8 +781,38 @@ namespace GameRL.Harmony
 
                 case ResetCompleteMessage m:
                     obj["Observation"] = JToken.FromObject(m.Observation ?? new object());
+                    // Always present, null included: a client asking whether the
+                    // reset produced a digest has to be able to tell "no" from
+                    // "field missing".
                     if (m.StateHash != null)
+                    {
                         obj["StateHash"] = m.StateHash;
+                    }
+                    else
+                    {
+                        obj["StateHash"] = JValue.CreateNull();
+                    }
+                    obj["Mode"] = m.Mode;
+                    if (m.Seed.HasValue)
+                    {
+                        obj["Seed"] = new JValue(m.Seed.Value);
+                    }
+                    else
+                    {
+                        obj["Seed"] = JValue.CreateNull();
+                    }
+                    obj["SeedConsumed"] = m.SeedConsumed;
+                    var conditions = new JArray();
+                    foreach (var condition in m.Postconditions ?? new List<ResetPostcondition>())
+                    {
+                        conditions.Add(new JObject
+                        {
+                            ["Name"] = condition.Name,
+                            ["Ok"] = condition.Ok,
+                            ["Observed"] = condition.Observed
+                        });
+                    }
+                    obj["Postconditions"] = conditions;
                     break;
 
                 case AgentRegisteredMessage m:

@@ -72,6 +72,81 @@ pub enum Observation {
     Custom(serde_json::Value),
 }
 
+/// How a reset should produce its world.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum ResetMode {
+    /// Load a known-good template save, then apply the seed to the RNG.
+    ///
+    /// The default, so an older client that sends no `Mode` keeps working. Note the
+    /// limit this carries: in this mode the world comes from the template file, so
+    /// the seed governs what happens *after* the load, not which world is loaded.
+    /// Two resets at different seeds therefore yield the same colony.
+    #[default]
+    Fast,
+    /// Generate a new colony from the seed. The only mode where the seed selects
+    /// the world.
+    Fresh,
+}
+
+/// One postcondition the adapter observed after a reset.
+///
+/// `ok` must be the result of reading a value. `observed` carries what was read,
+/// so a failed check is diagnosable without re-running it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ResetCheck {
+    pub name: String,
+    pub ok: bool,
+    pub observed: String,
+}
+
+/// What a reset actually did.
+///
+/// A reset that returns successfully has not thereby demonstrated that it reset
+/// anything: the adapter reports the postconditions it observed, and the caller
+/// decides. Keeping the checks separate from the success flag is the point --
+/// `reset` returning `Ok` is the dispatcher not throwing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ResetOutcome {
+    pub observation: Observation,
+    #[serde(default)]
+    pub state_hash: Option<String>,
+    pub mode: ResetMode,
+    #[serde(default)]
+    pub seed: Option<u64>,
+    /// Whether the seed was applied, as opposed to left pending.
+    #[serde(default)]
+    pub seed_consumed: bool,
+    #[serde(default)]
+    pub postconditions: Vec<ResetCheck>,
+}
+
+impl ResetOutcome {
+    /// `Some(true)` only if the adapter reported postconditions and all passed.
+    ///
+    /// `None` when it reported none. An adapter that reports nothing has not
+    /// demonstrated it can reset, so this is deliberately not a success: a gate
+    /// reading this must treat `None` as unproven rather than as a pass.
+    pub fn verified(&self) -> Option<bool> {
+        if self.postconditions.is_empty() {
+            None
+        } else {
+            Some(self.postconditions.iter().all(|c| c.ok))
+        }
+    }
+
+    /// The postconditions that failed, named.
+    pub fn failed_checks(&self) -> Vec<&str> {
+        self.postconditions
+            .iter()
+            .filter(|c| !c.ok)
+            .map(|c| c.name.as_str())
+            .collect()
+    }
+}
+
 /// Why an episode ended
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]

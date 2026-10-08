@@ -30,6 +30,9 @@
 - **#25**: InsertItems doesn't support lab_input inventory - FIXED (added lab_input to inventory chain)
 - **#27**: StartResearch fails silently - FIXED (auto-complete trigger techs, better diagnostics)
 - **#28**: Factorio 2.0 trigger technologies not handled - FIXED (auto-detected and completed)
+- **#29**: RimWorld reset logged ArgumentOutOfRangeException in WorldGrid - FIXED (see below)
+- **#30**: RimWorld reset reported "map 250x1" - FIXED (IntVec3.y is height, not depth)
+- **#31**: RimWorld Mode=Fresh could never run - FIXED (default ScenarioDef name did not exist)
 
 ---
 
@@ -323,3 +326,129 @@ These are tutorial techs that guide new players. They don't require science pack
 // Response (trigger tech auto-completed)
 {"success": true, "error": "trigger_tech_completed: steam-power (normally unlocked by in-game action)"}
 ```
+
+### ~~29. Reset Logs ArgumentOutOfRangeException in WorldGrid.get_Item~~ FIXED
+**Severity**: High (was misdiagnosed as a crash; it was not fatal)
+**Status**: FIXED and VERIFIED IN-GAME 2026-10-05
+**Location**: `adapters/rimworld/RimWorld.GameRL/Actions/RimWorldCommandExecutor.cs`, `LoadResetTemplate`
+
+**Symptoms**: Every `Mode=Fast` reset logged
+
+```
+Could not execute post-long-event action. Exception: System.ArgumentOutOfRangeException:
+Index was out of range. Must be non-negative and less than the size of the collection.
+  at System.Collections.Generic.List`1[T].get_Item (System.Int32 index)
+  at RimWorld.Planet.WorldGrid.get_Item (RimWorld.Planet.PlanetTile tile)
+  at Verse.Map.get_TileInfo ()
+  at Verse.Map.get_Biome ()
+  at RimWorld.AmbientSoundManager.RecreateMapSustainers ()
+  at Verse.LongEventHandler.ExecuteToExecuteWhenFinished ()
+```
+
+and the reset still reported success.
+
+**Three things the first diagnosis got wrong**, each contradicted by `Player.log`:
+1. It was attributed to `Mode=Fresh`. No `[GameRL] Fresh reset` line exists in
+   either log; every reset is `mode: Fast`.
+2. It was called a crash. `LongEventHandler.ExecuteToExecuteWhenFinished` wraps
+   each delegate in `try/catch` and logs. The log continues for hundreds of lines
+   of healthy play and 3 further resets afterwards.
+3. It was blamed on a map generated without a tile. The template save is fine; see
+   #30 for what `map 250x1` actually was.
+
+**Root cause**: `SavedGameLoaderNow.LoadGameFromSaveFileNow` was called bare.
+Vanilla calls it from exactly one place, `Verse/Root_Play.Start`, and both call
+sites wrap it in `LongEventHandler.QueueLongEvent(..., doAsynchronously: true, ...)`.
+That wrapper is load-bearing: `Verse.Game.LoadGame` assigns `CurrentMap` *before*
+`Scribe.loader.FinalizeLoading()` resolves cross-references, the `CurrentMap`
+setter calls `AmbientSoundManager.Notify_SwitchedMap()`, and
+`LongEventHandler.ExecuteWhenFinished` runs its delegate immediately when no long
+event is displayed. So `RecreateMapSustainers` read `Map.Biome` while
+`MapInfo.parent` was still null, `MapInfo.Tile` fell back to `PlanetTile.Invalid`
+(= `new PlanetTile(-1)`), and `WorldGrid`'s indexer — `tile.Layer.Tiles[tile.tileId]`,
+a raw `List` index with no bounds check — indexed `-1`.
+
+**Fix**: wrap the load in `LongEventHandler.ExecuteWhenFinished`. With no long
+event in flight that runs inline, so `Reset` stays blocking, and the
+`executingToExecuteWhenFinished` flag it sets defers the load's own nested
+`ExecuteWhenFinished` call until after `FinalizeLoading`. `QueueLongEvent` is
+wrong here: it completes on a later frame, so `Reset` would return before the
+world was in place.
+
+**VERIFIED 2026-10-05, in-game.** After the fix, three consecutive Fast resets
+produced **zero** `ArgumentOutOfRangeException` and zero `WorldGrid` entries in
+`Player.log`. The wrapper does what it was designed to do, and the stack trace
+proves the mechanism: the load now appears *inside* the deferred queue rather
+than being re-entered synchronously —
+
+```
+at Verse.SavedGameLoaderNow.LoadGameFromSaveFileNow
+at ...<LoadResetTemplate>b__0 ()
+at Verse.LongEventHandler.ExecuteToExecuteWhenFinished ()   <- the load runs here
+```
+
+so the nested `Notify_SwitchedMap` runs after `FinalizeLoading`, not before it.
+
+**A different exception now replaces it, thrown later and elsewhere:**
+
+```
+System.InvalidCastException: Specified cast is not valid.
+  at Verse.Find.get_MapUI ()
+  at Verse.Game.set_CurrentMap (Map value)
+  at Verse.Game.LoadGame ()
+```
+
+`Find.MapUI` casts `UIRoot` to a map UI. game-rl runs from the **main menu**
+(`ResetMessage handled by the frame:root_entry pump`, `UIRoot_Menu`), where that
+cast is invalid. Vanilla never hits this because it only ever loads a save from
+`Root_Play`, with Play mode already active. So the next blocker is not the load
+itself: it is that a save load from the main menu is not a state vanilla supports.
+
+**And a regression this fix introduced, found by the run above.** The
+`try/catch` around `ExecuteWhenFinished` was dead code: on the inline path
+`ExecuteToExecuteWhenFinished` runs each delegate inside its own `try/catch` and
+logs it, so a throwing load never reached the outer handler. The reset therefore
+reported a *failed* load as
+
+> The colony was replaced but is not playable ... the current map has no free
+> colonists. Observed map=Map-0, pawns=0.
+
+— a symptom of a load that never finished, dressed as a colony problem. The
+capture now lives inside the delegate. **A failure the caller cannot see is a
+failure it will explain wrongly.**
+
+### ~~30. Reset Reports "map 250x1"~~ FIXED
+**Severity**: Low (cosmetic, but it read as a degenerate map and sent the
+diagnosis after a non-existent bug)
+**Status**: FIXED
+**Location**: `RimWorldCommandExecutor.cs` (`CompleteReset`), `FreshResetGenerator.cs` (`SpawnColonists`)
+
+`map.info.Size` is `IntVec3(x, height, z)` and a map's height is always 1, so
+`Size.x` by `Size.y` reports `250x1` for a normal 250x250 map. The save XML is
+explicit: `<size>(250, 1, 250)</size>`. The playable extent is `.x` by `.z`;
+both call sites now use that, and both say why.
+
+### ~~31. Mode=Fresh Could Never Run~~ FIXED
+**Severity**: High (the whole point of Mode=Fresh was unreachable)
+**Status**: FIXED (code) / awaiting in-game verification
+**Location**: `adapters/rimworld/RimWorld.GameRL/Actions/FreshResetGenerator.cs`
+
+`DefaultScenarioDefName` was `"Crashland"`. There is no such defName; the stock
+`ScenarioDef` names in this install are `Crashlanded`, `Tutorial`, `LostTribe`,
+`TheRichExplorer`, `NakedBrutality`, `TheAnomaly`, `Mechanitor`, `Sanguophage`,
+`TheGravship`. `DefDatabase.GetNamedSilentFail("Crashland")` returns null, so the
+`scenario_def_resolved` probe could never pass and Mode=Fresh refused even with
+`GAMERL_FRESH_RESET=1`.
+
+Rewritten at the same time, against the shipped `Assembly-CSharp.dll` rather than
+against guesses: scenario set before `GenerateWorld`; `PostWorldGenerate` no longer
+called a second time (`GenerateWorld` already calls it, and doing so twice created
+two player factions); `Current.CreatingWorld` no longer assigned after
+`GenerateWorld` nulls it; `Scenario.PreMapGenerate` called **before**
+`InitNewGame`, which is what creates the player Settlement that `InitNewGame`
+requires and dereferences; `PostIdeoChosen` called when Ideology is active;
+`MapGenerator.GenerateMap` no longer called directly (`GenerateMap` calls
+`Current.Game.AddMap` itself); Odyssey coverage `0.5` rather than `0.3`; and two
+new guards, `RequirePlayerSettlement` and `RequireTileInGrid`, plus an explicit
+`map.TileInfo` read so that failure names itself instead of surfacing from inside
+vanilla.

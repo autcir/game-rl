@@ -15,8 +15,46 @@
     <ProjectReference Include="../../../dotnet/GameRL.Harmony/GameRL.Harmony.csproj" />
   </ItemGroup>
 
-  <!-- RimWorld reference assemblies (portable, from NuGet) -->
-  <ItemGroup>
+  <!-- RimWorld references.
+       Two ways in, and which one is in use is a build-time decision, not a
+       guess:
+
+         (default)  Krafs.Rimworld.Ref from NuGet. Portable, works on any
+                    machine, and has every method body stripped at RVA 0. It is
+                    enough to compile against and useless for reading vanilla
+                    behaviour: it will happily tell you a type exists without
+                    telling you what the method does.
+
+         (opt-in)   The real assemblies from the RimWorld install, which are the
+                    exact build the game runs - no version skew, and every body
+                    present. Enable with either
+
+                      dotnet build -p:RimWorldManagedDir=/path/to/RimWorldWin64_Data/Managed
+                      GAMERL_RIMWORLD_MANAGED_DIR=/path/to/... dotnet build
+
+                    This matters: Krafs.Rimworld.Ref 1.6.4633 is what this file
+                    names, and the game being run is 1.6.4850 rev646. Anything
+                    added or changed between those builds is invisible here.
+
+       Game-owned assemblies are reference-only. They are never copied to
+       ../Assemblies/, which is the mod folder and would otherwise ship a second
+       copy of Assembly-CSharp.dll next to the real one. -->
+  <PropertyGroup>
+    <RimWorldManagedDir Condition="'$(RimWorldManagedDir)' == '' and '$(GAMERL_RIMWORLD_MANAGED_DIR)' != ''">$(GAMERL_RIMWORLD_MANAGED_DIR)</RimWorldManagedDir>
+    <UseRealRimWorldAssemblies Condition="'$(RimWorldManagedDir)' != '' and Exists('$(RimWorldManagedDir)/Assembly-CSharp.dll')">true</UseRealRimWorldAssemblies>
+    <UseRealRimWorldAssemblies Condition="'$(UseRealRimWorldAssemblies)' == ''">false</UseRealRimWorldAssemblies>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(UseRealRimWorldAssemblies)' == 'true'">
+    <!-- Excluded: the .NET targeting pack and the Mono facades already supply
+         these, and referencing them again is a duplicate-assembly error. -->
+    <Reference Include="$(RimWorldManagedDir)/*.dll"
+               Exclude="$(RimWorldManagedDir)/mscorlib.dll;$(RimWorldManagedDir)/System*.dll;$(RimWorldManagedDir)/netstandard.dll;$(RimWorldManagedDir)/Mono.*.dll;$(RimWorldManagedDir)/Facades/**">
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(UseRealRimWorldAssemblies)' != 'true'">
     <PackageReference Include="Krafs.Rimworld.Ref" Version="1.6.4633" />
   </ItemGroup>
 

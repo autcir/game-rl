@@ -2,6 +2,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Reflection;
 using System.Security.Cryptography;
@@ -246,7 +247,9 @@ namespace RimWorld.GameRL.State
             {
                 Tick = CurrentTick,
                 Hour = map != null ? GenLocalDate.HourOfDay(map) : 0,
-                StateHash = stateHash,
+                // No digest means no delta: the client could not tell this from
+                // "nothing changed", which is the one thing a delta must never say.
+                StateHash = stateHash ?? "",
                 PreviousHash = previousHash,
                 Alerts = ExtractAlerts(),
                 Events = ConvertToObservationEvents(CollectEvents())
@@ -309,7 +312,13 @@ namespace RimWorld.GameRL.State
                         Hunger = colonist.Hunger,
                         Rest = colonist.Rest,
                         CurrentJob = colonist.CurrentJob,
-                        Position = new Position2D(colonist.Position?.X ?? 0, colonist.Position?.Y ?? 0),
+                        // No `?? 0` here. ColonistState.Position is non-nullable,
+                        // so the fallback could only ever fire if that changed — and
+                        // then it would fabricate map corner (0,0), a cell a pawn can
+                        // legitimately occupy, which is harder to tell from real data
+                        // than an honest absence. Read it straight and let the compiler
+                        // say so if it ever becomes nullable.
+                        Position = new Position2D(colonist.Position.X, colonist.Position.Y),
                         IsDrafted = colonist.IsDrafted,
                         IsDowned = colonist.IsDowned,
                         MentalState = colonist.MentalState,
@@ -430,8 +439,8 @@ namespace RimWorld.GameRL.State
             }
 
             // Check position change
-            var currentX = current.Position?.X ?? 0;
-            var currentY = current.Position?.Y ?? 0;
+            var currentX = current.Position.X;
+            var currentY = current.Position.Y;
             var posDiff = Math.Abs(currentX - prev.PositionX) + Math.Abs(currentY - prev.PositionY);
 
             bool shouldReportPosition = posDiff >= config.PositionThreshold;
@@ -503,8 +512,8 @@ namespace RimWorld.GameRL.State
                     Hunger = colonist.Hunger,
                     Rest = colonist.Rest,
                     CurrentJob = colonist.CurrentJob,
-                    PositionX = colonist.Position?.X ?? 0,
-                    PositionY = colonist.Position?.Y ?? 0,
+                    PositionX = colonist.Position.X,
+                    PositionY = colonist.Position.Y,
                     IsDrafted = colonist.IsDrafted,
                     IsDowned = colonist.IsDowned,
                     MentalState = colonist.MentalState,
@@ -545,8 +554,8 @@ namespace RimWorld.GameRL.State
                     Hunger = colonist.Hunger,
                     Rest = colonist.Rest,
                     CurrentJob = colonist.CurrentJob,
-                    PositionX = colonist.Position?.X ?? 0,
-                    PositionY = colonist.Position?.Y ?? 0,
+                    PositionX = colonist.Position.X,
+                    PositionY = colonist.Position.Y,
                     IsDrafted = colonist.IsDrafted,
                     IsDowned = colonist.IsDowned,
                     MentalState = colonist.MentalState,
@@ -606,6 +615,24 @@ namespace RimWorld.GameRL.State
             _previousResources.Remove(agentId);
             _previousEntityIds.Remove(agentId);
             _previousThreatIds.Remove(agentId);
+        }
+
+        /// <summary>
+        /// Drop every piece of per-episode state.
+        ///
+        /// The delta snapshots are per agent and used to survive the episode
+        /// boundary, which meant the second episode started from the first
+        /// one's state and the delta reward read it as new. The pending events
+        /// have the same problem one step later: an event recorded near the end
+        /// of episode N is not news at the start of episode N+1.
+        /// </summary>
+        public void ClearEpisodeState(IEnumerable<string> agentIds)
+        {
+            foreach (var agentId in agentIds)
+                ClearAgentState(agentId);
+
+            _pendingEvents.Clear();
+            _lastEventTick.Clear();
         }
 
         private List<VisitorState> ExtractVisitors(Map? map)
@@ -762,41 +789,85 @@ namespace RimWorld.GameRL.State
             return threats;
         }
 
-        public string ComputeStateHash()
+        /// <summary>
+        /// Digest of the colony: what Gate A and Gate C compare.
+        ///
+        /// Describes the world, not when it was sampled. TicksGame is
+        /// deliberately absent, because with the tick in the digest two
+        /// identical worlds at different ticks hash differently and the
+        /// question Gate A exists to answer — did this reset produce a
+        /// different colony? — becomes unanswerable.
+        ///
+        /// Returns null when there is nothing to digest. There is no sentinel
+        /// string: a failure carrying the "sha256:" prefix is indistinguishable
+        /// from a state by prefix matching alone.
+        /// </summary>
+        public string? ComputeStateHash()
         {
             var map = Find.CurrentMap;
-            if (map == null) return "sha256:no-map";
+            if (map == null)
+            {
+                Log.Error("[GameRL] ComputeStateHash: no current map, produced no digest");
+                return null;
+            }
 
             try
             {
                 var sb = new StringBuilder();
 
-                // Hash colonist positions and health - snapshot to avoid collection modification
-                var colonists = map.mapPawns.FreeColonists.ToList();
+                // Ordinal sort on ThingID: the pawn list order is a game-side
+                // detail, and a digest that moves when the list is rebuilt
+                // reports drift that is not in the world.
+                var colonists = map.mapPawns.FreeColonists
+                    .Where(p => p != null && !p.Destroyed)
+                    .OrderBy(p => p.ThingID, StringComparer.Ordinal)
+                    .ToList();
+
                 foreach (var pawn in colonists)
                 {
-                    if (pawn == null || pawn.Destroyed) continue;
                     try
                     {
-                        sb.Append($"{pawn.ThingID}:{pawn.Position}:{pawn.health?.summaryHealth?.SummaryHealthPercent ?? 1f:F2};");
+                        // Integer cells, invariant formatting. Thing.Position is
+                        // an IntVec3 whose ToString() goes through the current
+                        // culture, which would make the digest locale-dependent.
+                        //
+                        // The horizontal cell is (x, z), not (x, y): IntVec2 — the
+                        // type IntVec3.ToIntVec2 projects onto — is built as
+                        // IntVec2(newX, newZ), so IntVec3.y is the vertical axis.
+                        // Digesting cell.y hashed how high the pawn stood, which
+                        // on level ground is a constant: every colonist on the
+                        // same floor contributed the same number and the digest
+                        // stopped discriminating one cell from the next.
+                        var cell = pawn.Position;
+                        var health = pawn.health?.summaryHealth?.SummaryHealthPercent ?? 1f;
+                        sb.Append(pawn.ThingID);
+                        sb.Append(':');
+                        sb.Append(cell.x.ToString(CultureInfo.InvariantCulture));
+                        sb.Append(',');
+                        sb.Append(cell.z.ToString(CultureInfo.InvariantCulture));
+                        sb.Append(':');
+                        sb.Append(health.ToString("F2", CultureInfo.InvariantCulture));
+                        sb.Append(';');
                     }
-                    catch
+                    catch (Exception ex)
                     {
-                        // Skip pawns that throw
+                        Log.Warning($"[GameRL] ComputeStateHash: skipping {pawn.ThingID}: {ex.Message}");
                     }
                 }
 
-                // Hash key resources
-                sb.Append($"wealth:{map.wealthWatcher?.WealthTotal ?? 0:F0};");
-                sb.Append($"tick:{Find.TickManager?.TicksGame ?? 0};");
+                sb.Append($"wealth:{(map.wealthWatcher?.WealthTotal ?? 0f).ToString("F0", CultureInfo.InvariantCulture)};");
 
                 using var sha = SHA256.Create();
                 var hash = sha.ComputeHash(Encoding.UTF8.GetBytes(sb.ToString()));
                 return $"sha256:{BitConverter.ToString(hash).Replace("-", "").ToLower()}";
             }
-            catch
+            catch (Exception ex)
             {
-                return "sha256:error";
+                // Swallowed exceptions used to come back as "sha256:error", which
+                // reads as a state. The exception is the only thing that says
+                // what went wrong.
+                Log.Error($"[GameRL] ComputeStateHash failed: {ex}");
+                return null;
             }
         }
 

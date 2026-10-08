@@ -1,63 +1,62 @@
 // Survival-focused reward computation for RimWorld
+//
+// The reward is a function of two readings of the colony, and of nothing else.
+// It holds no state, so it cannot disagree with itself, and it reads nothing
+// but its arguments, so the answer cannot depend on when it was asked.
 
 using System.Collections.Generic;
-using System.Linq;
-using System.Reflection;
-using Verse;
-using RimWorld;
 
 namespace RimWorld.GameRL.Rewards
 {
     /// <summary>
     /// Computes reward components focused on colony survival.
-    /// Rewards are computed as deltas between steps to encourage progress.
+    ///
+    /// Stateless by construction. Both endpoints of every delta arrive as
+    /// arguments — <see cref="RewardSnapshot"/> values captured by the caller —
+    /// and no field is read or written, so:
+    ///
+    ///   * calling Compute twice with the same pair returns the same frame, and
+    ///   * the total and the components come out of one
+    ///     <see cref="RewardFrame"/>, so they cannot be two computations of the
+    ///     same question.
+    ///
+    /// The previous version kept `_last*` fields, read the live world and
+    /// updated those fields as it went. It was a delta function wearing the
+    /// signature of a pure one, which is why calling it twice in a step
+    /// produced a reward and a total from two different worlds.
+    ///
+    /// Deltas are between steps, not within a step. Which step is "previous" is
+    /// the caller's business: the executor owns the per-episode baseline and
+    /// resets it at the episode boundary.
     /// </summary>
-    public class SurvivalReward
+    public sealed class SurvivalReward
     {
-        // Previous state for delta computation
-        private int _lastColonistCount;
-        private float _lastWealth;
-        private int _lastFoodDays;
-        private int _lastHostileCount;
-        private int _lastWoodCount;
-        private int _lastSteelCount;
-        private float _lastResearchProgress;
-        private int _lastBuildingCount;
-
-        public SurvivalReward()
+        /// <summary>
+        /// PURE: (previous snapshot, current snapshot) -&gt; reward frame.
+        ///
+        /// Reads no instance field and writes none, and calls nothing that can
+        /// see one: the game is reached only through the snapshots handed in.
+        /// </summary>
+        /// <param name="previous">The reading the last step was measured against.</param>
+        /// <param name="current">The reading taken now.</param>
+        public RewardFrame Compute(RewardSnapshot previous, RewardSnapshot current)
         {
-            Reset();
-        }
+            // No map is not a colony that lost everything. The old early return
+            // is preserved deliberately: differencing against a mapless
+            // baseline would book the missing map as a mass colonist death.
+            if (!current.HasMap)
+            {
+                return RewardFrame.Empty();
+            }
 
-        public void Reset()
-        {
-            var map = Find.CurrentMap;
-            _lastColonistCount = map?.mapPawns.FreeColonistsCount ?? 0;
-            _lastWealth = map?.wealthWatcher.WealthTotal ?? 0f;
-            _lastFoodDays = ComputeFoodDays(map);
-            _lastHostileCount = CountHostiles(map);
-            _lastWoodCount = map?.resourceCounter.GetCount(ThingDefOf.WoodLog) ?? 0;
-            _lastSteelCount = map?.resourceCounter.GetCount(ThingDefOf.Steel) ?? 0;
-            _lastResearchProgress = GetResearchProgress();
-            _lastBuildingCount = map?.listerBuildings.allBuildingsColonist.Count ?? 0;
-        }
-
-        public Dictionary<string, double> Compute()
-        {
             var components = new Dictionary<string, double>();
-            var map = Find.CurrentMap;
-
-            if (map == null)
-                return components;
-
-            var colonists = map.mapPawns.FreeColonists.ToList();
-            var colonistCount = colonists.Count;
-            var wealth = map.wealthWatcher.WealthTotal;
+            var colonistCount = current.ColonistCount;
+            var wealth = current.Wealth;
 
             // ═══════════════════════════════════════════════════════════════
             // CRITICAL: Colonist survival (large magnitude)
             // ═══════════════════════════════════════════════════════════════
-            var colonistDelta = colonistCount - _lastColonistCount;
+            var colonistDelta = colonistCount - previous.ColonistCount;
             if (colonistDelta < 0)
             {
                 // Major penalty for deaths
@@ -75,45 +74,38 @@ namespace RimWorld.GameRL.Rewards
             if (colonistCount > 0)
             {
                 // Mood: reward for happy colonists, penalty for unhappy
-                var moodAvg = colonists.Average(p => p.needs?.mood?.CurLevelPercentage ?? 0.5f);
-                components["mood"] = (moodAvg - 0.5) * 0.2;
+                components["mood"] = (current.MoodAverage - 0.5) * 0.2;
 
                 // Hunger: penalty scales with severity
-                var avgHunger = colonists.Average(p => 1.0f - (p.needs?.food?.CurLevelPercentage ?? 1f));
-                if (avgHunger > 0.3f)
+                if (current.AverageHunger > 0.3f)
                 {
-                    components["hunger"] = -avgHunger * 0.3;
+                    components["hunger"] = -current.AverageHunger * 0.3;
                 }
 
                 // Rest: penalty for exhausted colonists
-                var exhaustedCount = colonists.Count(p => p.needs?.rest?.CurLevelPercentage < 0.2f);
-                if (exhaustedCount > 0)
+                if (current.ExhaustedCount > 0)
                 {
-                    components["exhaustion"] = -exhaustedCount * 0.1;
+                    components["exhaustion"] = -current.ExhaustedCount * 0.1;
                 }
 
                 // Health: penalty for injuries
-                var avgHealth = colonists.Average(p => p.health?.summaryHealth?.SummaryHealthPercent ?? 1f);
-                if (avgHealth < 0.9f)
+                if (current.AverageHealth < 0.9f)
                 {
-                    components["health"] = (avgHealth - 1.0) * 0.2;
+                    components["health"] = (current.AverageHealth - 1.0) * 0.2;
                 }
             }
 
             // ═══════════════════════════════════════════════════════════════
             // PRODUCTIVITY: Idle penalty, wealth growth
             // ═══════════════════════════════════════════════════════════════
-            var idleCount = colonists.Count(p =>
-                p.CurJob?.def == JobDefOf.Wait_Wander ||
-                p.CurJob?.def == JobDefOf.Wait);
-            if (idleCount > 0)
+            if (current.IdleCount > 0)
             {
-                components["idle"] = -idleCount * 0.05;
+                components["idle"] = -current.IdleCount * 0.05;
             }
 
             // Wealth progress (capped to avoid exploitation)
-            var wealthDelta = wealth - _lastWealth;
-            var wealthReward = System.Math.Clamp(wealthDelta / 5000.0, -0.5, 0.5);
+            var wealthDelta = wealth - previous.Wealth;
+            var wealthReward = Clamp(wealthDelta / 5000.0, -0.5, 0.5);
             if (System.Math.Abs(wealthReward) > 0.001)
             {
                 components["wealth"] = wealthReward;
@@ -122,12 +114,12 @@ namespace RimWorld.GameRL.Rewards
             // ═══════════════════════════════════════════════════════════════
             // FOOD SECURITY: Days of food stockpiled
             // ═══════════════════════════════════════════════════════════════
-            var foodDays = ComputeFoodDays(map);
-            var foodDelta = foodDays - _lastFoodDays;
+            var foodDays = current.FoodDays;
+            var foodDelta = foodDays - previous.FoodDays;
             if (foodDelta != 0)
             {
                 // Reward for building food reserves, penalty for losing them
-                components["food_security"] = System.Math.Clamp(foodDelta * 0.1, -0.5, 0.5);
+                components["food_security"] = Clamp(foodDelta * 0.1, -0.5, 0.5);
             }
             // Continuous penalty if food is critically low
             if (foodDays < 2)
@@ -138,8 +130,7 @@ namespace RimWorld.GameRL.Rewards
             // ═══════════════════════════════════════════════════════════════
             // THREATS: Bonus for eliminating hostiles
             // ═══════════════════════════════════════════════════════════════
-            var hostileCount = CountHostiles(map);
-            var hostileDelta = hostileCount - _lastHostileCount;
+            var hostileDelta = current.HostileCount - previous.HostileCount;
             if (hostileDelta < 0)
             {
                 // Bonus for killing hostiles
@@ -154,11 +145,8 @@ namespace RimWorld.GameRL.Rewards
             // ═══════════════════════════════════════════════════════════════
             // RESOURCES: Gathering wood, steel, etc.
             // ═══════════════════════════════════════════════════════════════
-            var woodCount = map.resourceCounter.GetCount(ThingDefOf.WoodLog);
-            var steelCount = map.resourceCounter.GetCount(ThingDefOf.Steel);
-
-            var woodDelta = woodCount - _lastWoodCount;
-            var steelDelta = steelCount - _lastSteelCount;
+            var woodDelta = current.WoodCount - previous.WoodCount;
+            var steelDelta = current.SteelCount - previous.SteelCount;
 
             if (woodDelta > 0)
             {
@@ -172,97 +160,54 @@ namespace RimWorld.GameRL.Rewards
             // ═══════════════════════════════════════════════════════════════
             // RESEARCH: Progress on current project
             // ═══════════════════════════════════════════════════════════════
-            var currentProgress = GetResearchProgress();
+            var currentProgress = current.ResearchProgress;
             if (currentProgress > 0)
             {
-                var progressDelta = currentProgress - _lastResearchProgress;
+                var progressDelta = currentProgress - previous.ResearchProgress;
                 if (progressDelta > 0)
                 {
                     components["research"] = progressDelta * 2.0;
                 }
                 // Bonus for completing research
-                if (currentProgress >= 1.0f && _lastResearchProgress < 1.0f)
+                if (currentProgress >= 1.0f && previous.ResearchProgress < 1.0f)
                 {
                     components["research_complete"] = 1.0;
                 }
             }
-            _lastResearchProgress = currentProgress;
 
             // ═══════════════════════════════════════════════════════════════
             // CONSTRUCTION: Building new structures
             // ═══════════════════════════════════════════════════════════════
-            var buildingCount = map.listerBuildings.allBuildingsColonist.Count;
-            var buildingDelta = buildingCount - _lastBuildingCount;
+            var buildingDelta = current.BuildingCount - previous.BuildingCount;
             if (buildingDelta > 0)
             {
                 components["construction"] = buildingDelta * 0.1;
             }
 
-            // ═══════════════════════════════════════════════════════════════
-            // Update state for next computation
-            // ═══════════════════════════════════════════════════════════════
-            _lastColonistCount = colonistCount;
-            _lastWealth = wealth;
-            _lastFoodDays = foodDays;
-            _lastHostileCount = hostileCount;
-            _lastWoodCount = woodCount;
-            _lastSteelCount = steelCount;
-            _lastBuildingCount = buildingCount;
-
-            return components;
+            return RewardFrame.FromComponents(components);
         }
 
-        private static int ComputeFoodDays(Map? map)
+        /// <summary>
+        /// Clamp for net472.
+        ///
+        /// Not <c>Math.Clamp</c>. That overload is .NET Core 2.0 and later and is
+        /// absent from the net472 targeting pack this mod builds against, so
+        /// calling it only compiled because Krafs.Rimworld.Ref ships its own
+        /// mscorlib that happens to include it. RimWorld's Unity Mono BCL does
+        /// have it, so it would have worked at runtime — which is exactly what
+        /// makes it worth removing: the reference package was quietly widening
+        /// the BCL surface the code compiles against, and the widened surface
+        /// was load-bearing for two reward components.
+        ///
+        /// Two-sided by construction: Math.Min(max, Math.Max(min, value)) is
+        /// correct when min &lt;= max, and when min &gt; max it returns min
+        /// rather than throwing, so a caller that passes the bounds in the
+        /// wrong order gets a clamped-to-min value instead of an exception
+        /// mid-reward. Every use here passes a literal lower and upper bound.
+        /// </summary>
+        private static double Clamp(double value, double min, double max)
         {
-            if (map == null) return 0;
-            float foodCount = map.resourceCounter.TotalHumanEdibleNutrition;
-            int colonistCount = map.mapPawns.FreeColonistsCount;
-            return colonistCount > 0 ? (int)(foodCount / (colonistCount * 1.6f)) : 0;
-        }
-
-        private static int CountHostiles(Map? map)
-        {
-            if (map == null) return 0;
-            try
-            {
-                return map.mapPawns.AllPawnsSpawned
-                    .Count(p => p != null && !p.Destroyed && p.Spawned && p.HostileTo(Faction.OfPlayer));
-            }
-            catch
-            {
-                return 0;
-            }
-        }
-
-        private static float GetResearchProgress()
-        {
-            try
-            {
-                var researchManager = Find.ResearchManager;
-                if (researchManager == null) return 0f;
-
-                // Use reflection to safely get current project (API varies by RimWorld version)
-                var field = typeof(ResearchManager).GetField("currentProj",
-                    BindingFlags.NonPublic | BindingFlags.Instance);
-                if (field == null)
-                {
-                    // Try public property
-                    var prop = typeof(ResearchManager).GetProperty("CurrentProject");
-                    if (prop != null)
-                    {
-                        var proj = prop.GetValue(researchManager) as ResearchProjectDef;
-                        return proj?.ProgressPercent ?? 0f;
-                    }
-                    return 0f;
-                }
-
-                var currentProj = field.GetValue(researchManager) as ResearchProjectDef;
-                return currentProj?.ProgressPercent ?? 0f;
-            }
-            catch
-            {
-                return 0f;
-            }
+            return System.Math.Min(max, System.Math.Max(min, value));
         }
     }
 }

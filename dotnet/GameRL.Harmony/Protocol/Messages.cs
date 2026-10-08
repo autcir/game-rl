@@ -118,13 +118,42 @@ namespace GameRL.Harmony.Protocol
     }
 
     /// <summary>
-    /// Reset complete with initial observation
+    /// Reset complete with initial observation.
+    ///
+    /// The reset fields are not decoration. "A reset was sent" and "a new
+    /// world is in place" are different claims, and only the second one is
+    /// evidence that an episode exists.
     /// </summary>
     public class ResetCompleteMessage : GameMessage
     {
         public override string Type => "ResetComplete";
         public object? Observation { get; set; }
         public string? StateHash { get; set; }
+
+        /// <summary>Mode that was actually performed, "Fast" or "Fresh".</summary>
+        public string Mode { get; set; } = "Fast";
+
+        /// <summary>Seed as received, echoed back.</summary>
+        public ulong? Seed { get; set; }
+
+        /// <summary>True only when the seed reached the game's RNG.</summary>
+        public bool SeedConsumed { get; set; }
+
+        /// <summary>
+        /// The fixed, ordered list of checks this reset passed, each carrying
+        /// the value that was read to decide it.
+        /// </summary>
+        public List<ResetPostcondition> Postconditions { get; set; } = new();
+    }
+
+    /// <summary>
+    /// One reset check and the value observed while making it.
+    /// </summary>
+    public class ResetPostcondition
+    {
+        public string Name { get; set; } = "";
+        public bool Ok { get; set; }
+        public string Observed { get; set; } = "";
     }
 
     /// <summary>
@@ -222,6 +251,12 @@ namespace GameRL.Harmony.Protocol
         public override string Type => "Reset";
         public ulong? Seed { get; set; }
         public string? Scenario { get; set; }
+
+        /// <summary>
+        /// "Fast" or "Fresh". Null when the client predates the field, which
+        /// means "Fast".
+        /// </summary>
+        public string? Mode { get; set; }
     }
 
     /// <summary>

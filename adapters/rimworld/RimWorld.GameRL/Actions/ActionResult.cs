@@ -27,6 +27,17 @@ namespace RimWorld.GameRL.Actions
         /// </summary>
         public ActionErrorCode? ErrorCode { get; set; }
 
+        /// <summary>
+        /// Whether the action changed the world: "Changed", "NoEffect", or
+        /// "Unknown" when the hash could not be compared.
+        ///
+        /// Measured from the state hash rather than reported by the action, so
+        /// every action gets an honest answer without having to describe itself.
+        /// A well-formed action that does nothing is the case that matters: it
+        /// is indistinguishable from success if you only look at the return.
+        /// </summary>
+        public string Effect { get; set; } = "Unknown";
+
         public static ActionResult Ok(string actionType, string message = "")
         {
             return new ActionResult
